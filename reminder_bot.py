@@ -6,7 +6,7 @@ from datetime import datetime
 import pytz
 
 # 🔑 Bot token va guruh ID'larini yozing
-API_TOKEN = 'YOUR_BOT_TOKEN'
+API_TOKEN = '7289422688:AAF6s2dq-n9doyGF-4jSfRvkYnbb6o9cNoM'
 GROUP_IDS = [-1001234567890, -1009876543210]  # <-- o'z guruhlaringiz ID'larini yozing
 
 # 🕒 Amerika/New_York vaqti bilan ishlash
