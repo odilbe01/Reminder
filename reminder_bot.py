@@ -1,15 +1,17 @@
+NEW SERVER 
+
+
 import asyncio
 import json
-import re
-from datetime import datetime, timedelta
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import ChatMemberUpdatedFilter
+from aiogram.enums.chat_member_status import ChatMemberStatus
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from datetime import datetime
 import pytz
 import os
-from aiogram import Bot, Dispatcher, types
-from aiogram.enums.chat_member_status import ChatMemberStatus
-from aiogram.filters import ChatMemberUpdatedFilter
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-API_TOKEN = os.getenv("API_TOKEN")
+API_TOKEN = '7289422688:AAF6s2dq-n9doyGF-4jSfRvkYnbb6o9cNoM'
 TIMEZONE = pytz.timezone("America/New_York")
 GROUP_FILE = "groups.json"
 
@@ -73,6 +75,7 @@ DAILY_REMINDER = """🟨 📅 DAILY UPDATER TASK REMINDER 🟨
 
 REPLY_MESSAGE = "Please check all post trucks, the driver was covered! It takes just few seconds, let's do!"
 
+# JSON filega chat_id yozish
 def save_chat_id(chat_id):
     if os.path.exists(GROUP_FILE):
         with open(GROUP_FILE, 'r') as f:
@@ -85,12 +88,14 @@ def save_chat_id(chat_id):
         with open(GROUP_FILE, 'w') as f:
             json.dump(group_ids, f)
 
+# JSON filedan chat_id o‘qish
 def load_group_ids():
     if os.path.exists(GROUP_FILE):
         with open(GROUP_FILE, 'r') as f:
             return json.load(f)
     return []
 
+# Reminder yuborish
 async def send_reminder():
     group_ids = load_group_ids()
     for chat_id in group_ids:
@@ -99,61 +104,14 @@ async def send_reminder():
         except Exception as e:
             print(f"[X] Failed to send to {chat_id}: {e}")
 
-# Daily scheduler
+# Reminderlarni jadvalga qo‘shish
 scheduler.add_job(send_reminder, 'cron', hour=0, minute=0)
 scheduler.add_job(send_reminder, 'cron', hour=8, minute=0)
 scheduler.add_job(send_reminder, 'cron', hour=16, minute=0)
 
-# When bot is added to a new group
+# Bot guruhga qo‘shilganda avtomatik chat_id qo‘shadi
 @dp.chat_member(ChatMemberUpdatedFilter(member_status_changed=True))
 async def new_chat_handler(event: types.ChatMemberUpdated):
     if event.new_chat_member.status == ChatMemberStatus.MEMBER:
         save_chat_id(event.chat.id)
         await bot.send_message(event.chat.id, "✅ Bot added! Daily reminder will now be sent automatically.")
-
-# Message handler: reply to alert and process PU
-@dp.message()
-async def handle_messages(message: types.Message):
-    # Auto reply to ⚠️ New Load Alert
-    if message.text and "⚠️ New Load Alert" in message.text:
-        await message.reply(REPLY_MESSAGE)
-
-    # PU reminder detection (caption in photo)
-    if message.caption and message.photo:
-        lines = message.caption.strip().split("\n")
-        if len(lines) >= 2 and lines[0].startswith("PU: ") and re.search(r"\d+[hm]", lines[1]):
-            try:
-                pu_str = lines[0][4:].strip()
-                offset_str = lines[1].strip().lower()
-
-                # Parse offset
-                offset_parts = offset_str.replace(" ", "").split("h")
-                hours = int(offset_parts[0]) if offset_parts[0] else 0
-                minutes = int(offset_parts[1].replace("m", "")) if len(offset_parts) > 1 and offset_parts[1] else 0
-
-                # Parse PU time
-                pu_time = datetime.strptime(pu_str, "%a %b %d %H:%M %Z")
-                pu_time = TIMEZONE.localize(pu_time)
-
-                # Calculate reminder time
-                offset = timedelta(hours=hours, minutes=minutes)
-                reminder_time = pu_time - offset - timedelta(minutes=10)
-
-                # Schedule reminder
-                scheduler.add_job(
-                    bot.send_message,
-                    trigger='date',
-                    run_date=reminder_time,
-                    args=[message.chat.id, "PLEASE BE READY, LOAD AI TIME IS CLOSE!"]
-                )
-                await message.reply("noted")
-            except Exception as e:
-                print(f"[!] Failed to parse PU reminder: {e}")
-
-# Launch bot
-async def main():
-    scheduler.start()
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
