@@ -1,14 +1,14 @@
 import asyncio
 import json
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import ChatMemberUpdatedFilter
-from aiogram.enums.chat_member_status import ChatMemberStatus
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from datetime import datetime
-import pytz
 import os
+from datetime import datetime
+from aiogram import Bot, Dispatcher, types
+from aiogram.enums.chat_member_status import ChatMemberStatus
+from aiogram.filters import ChatMemberUpdatedFilter
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import pytz
 
-API_TOKEN = '7289422688:AAF6s2dq-n9doyGF-4jSfRvkYnbb6o9cNoM'
+API_TOKEN = os.getenv("API_TOKEN")
 TIMEZONE = pytz.timezone("America/New_York")
 GROUP_FILE = "groups.json"
 
@@ -72,7 +72,6 @@ DAILY_REMINDER = """🟨 📅 DAILY UPDATER TASK REMINDER 🟨
 
 REPLY_MESSAGE = "Please check all post trucks, the driver was covered! It takes just few seconds, let's do!"
 
-# JSON filega chat_id yozish
 def save_chat_id(chat_id):
     if os.path.exists(GROUP_FILE):
         with open(GROUP_FILE, 'r') as f:
@@ -85,14 +84,12 @@ def save_chat_id(chat_id):
         with open(GROUP_FILE, 'w') as f:
             json.dump(group_ids, f)
 
-# JSON filedan chat_id o‘qish
 def load_group_ids():
     if os.path.exists(GROUP_FILE):
         with open(GROUP_FILE, 'r') as f:
             return json.load(f)
     return []
 
-# Reminder yuborish
 async def send_reminder():
     group_ids = load_group_ids()
     for chat_id in group_ids:
@@ -101,28 +98,24 @@ async def send_reminder():
         except Exception as e:
             print(f"[X] Failed to send to {chat_id}: {e}")
 
-# Reminderlarni jadvalga qo‘shish
 scheduler.add_job(send_reminder, 'cron', hour=0, minute=0)
 scheduler.add_job(send_reminder, 'cron', hour=8, minute=0)
 scheduler.add_job(send_reminder, 'cron', hour=16, minute=0)
 
-# Bot guruhga qo‘shilganda avtomatik chat_id qo‘shadi
 @dp.chat_member(ChatMemberUpdatedFilter(member_status_changed=True))
-async def new_chat_handler(event: types.ChatMemberUpdated):
+async def on_new_group(event: types.ChatMemberUpdated):
     if event.new_chat_member.status == ChatMemberStatus.MEMBER:
         save_chat_id(event.chat.id)
         await bot.send_message(event.chat.id, "✅ Bot added! Daily reminder will now be sent automatically.")
 
-# ⚠️ New Load Alert ga javob
 @dp.message()
-async def handle_alert(message: types.Message):
+async def handle_message(message: types.Message):
     if message.text and "⚠️ New Load Alert" in message.text:
         await message.reply(REPLY_MESSAGE)
 
-# Botni ishga tushurish
 async def main():
     scheduler.start()
     await dp.start_polling(bot)
 
-if name == "main":
+if __name__ == "__main__":
     asyncio.run(main())
