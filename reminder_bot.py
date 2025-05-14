@@ -1,18 +1,21 @@
 import asyncio
+import json
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import CommandStart
+from aiogram.filters import ChatMemberUpdatedFilter
+from aiogram.enums.chat_member_status import ChatMemberStatus
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime
 import pytz
+import os
 
-# 🔑 Bot token va guruh ID'larini yozing
 API_TOKEN = '7289422688:AAF6s2dq-n9doyGF-4jSfRvkYnbb6o9cNoM'
-GROUP_IDS = [-1001234567890, -1009876543210]  # <-- o'z guruhlaringiz ID'larini yozing
-
-# 🕒 Amerika/New_York vaqti bilan ishlash
 TIMEZONE = pytz.timezone("America/New_York")
+GROUP_FILE = "groups.json"
 
-# 📩 Reminder matni
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher()
+scheduler = AsyncIOScheduler(timezone=TIMEZONE)
+
 DAILY_REMINDER = """🟨 📅 DAILY UPDATER TASK REMINDER 🟨
 👇 Please read and follow carefully every day!
 
@@ -64,37 +67,59 @@ DAILY_REMINDER = """🟨 📅 DAILY UPDATER TASK REMINDER 🟨
 • 🚧 Traffic delays
 • 🚫 Wrong trailer or seal
 • ❗️No empty trailer
-• 🕒 Load marked “loading” but departure time passed"""
+• 🕒 Load marked “loading” but departure time passed
+"""
 
 REPLY_MESSAGE = "Please check all post trucks, the driver was covered! It takes just few seconds, let's do!"
 
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher()
-scheduler = AsyncIOScheduler(timezone=TIMEZONE)
+# JSON filega chat_id yozish
+def save_chat_id(chat_id):
+    if os.path.exists(GROUP_FILE):
+        with open(GROUP_FILE, 'r') as f:
+            group_ids = json.load(f)
+    else:
+        group_ids = []
 
-# 🕗 Reminder yuborish
+    if chat_id not in group_ids:
+        group_ids.append(chat_id)
+        with open(GROUP_FILE, 'w') as f:
+            json.dump(group_ids, f)
+
+# JSON filedan chat_id o‘qish
+def load_group_ids():
+    if os.path.exists(GROUP_FILE):
+        with open(GROUP_FILE, 'r') as f:
+            return json.load(f)
+    return []
+
+# Reminder yuborish
 async def send_reminder():
-    for group_id in GROUP_IDS:
+    group_ids = load_group_ids()
+    for chat_id in group_ids:
         try:
-            await bot.send_message(group_id, DAILY_REMINDER)
+            await bot.send_message(chat_id, DAILY_REMINDER)
         except Exception as e:
-            print(f"[X] Error sending to {group_id}: {e}")
+            print(f"[X] Failed to send to {chat_id}: {e}")
 
-# 🗓 Har kuni 3 marta yuboriladi
-scheduler.add_job(send_reminder, trigger='cron', hour=0, minute=0)
-scheduler.add_job(send_reminder, trigger='cron', hour=8, minute=0)
-scheduler.add_job(send_reminder, trigger='cron', hour=16, minute=0)
+# Reminderlarni jadvalga qo‘shish
+scheduler.add_job(send_reminder, 'cron', hour=0, minute=0)
+scheduler.add_job(send_reminder, 'cron', hour=8, minute=0)
+scheduler.add_job(send_reminder, 'cron', hour=16, minute=0)
 
-# ⚠️ New Load Alert xabari uchun avtomatik reply
+# Bot guruhga qo‘shilganda avtomatik chat_id qo‘shadi
+@dp.chat_member(ChatMemberUpdatedFilter(member_status_changed=True))
+async def new_chat_handler(event: types.ChatMemberUpdated):
+    if event.new_chat_member.status == ChatMemberStatus.MEMBER:
+        save_chat_id(event.chat.id)
+        await bot.send_message(event.chat.id, "✅ Bot added! Daily reminder will now be sent automatically.")
+
+# ⚠️ New Load Alert ga javob
 @dp.message()
-async def alert_reply(message: types.Message):
+async def handle_alert(message: types.Message):
     if message.text and "⚠️ New Load Alert" in message.text:
-        try:
-            await message.reply(REPLY_MESSAGE)
-        except Exception as e:
-            print(f"[!] Reply failed: {e}")
+        await message.reply(REPLY_MESSAGE)
 
-# 🔁 Botni ishga tushurish
+# Botni ishga tushurish
 async def main():
     scheduler.start()
     await dp.start_polling(bot)
