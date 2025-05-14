@@ -115,3 +115,16 @@ async def new_chat_handler(event: types.ChatMemberUpdated):
     if event.new_chat_member.status == ChatMemberStatus.MEMBER:
         save_chat_id(event.chat.id)
         await bot.send_message(event.chat.id, "✅ Bot added! Daily reminder will now be sent automatically.")
+# ⚠️ New Load Alert ga javob
+@dp.message()
+async def handle_alert(message: types.Message):
+    if message.text and "⚠️ New Load Alert" in message.text:
+        await message.reply(REPLY_MESSAGE)
+
+# Botni ishga tushurish
+async def main():
+    scheduler.start()
+    await dp.start_polling(bot)
+
+if name == "main":
+    asyncio.run(main())
