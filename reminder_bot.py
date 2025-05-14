@@ -115,6 +115,7 @@ async def new_chat_handler(event: types.ChatMemberUpdated):
     if event.new_chat_member.status == ChatMemberStatus.MEMBER:
         save_chat_id(event.chat.id)
         await bot.send_message(event.chat.id, "✅ Bot added! Daily reminder will now be sent automatically.")
+
 # ⚠️ New Load Alert ga javob
 @dp.message()
 async def handle_alert(message: types.Message):
