@@ -23,7 +23,7 @@ async def handle_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE
 # Asosiy ishga tushirish funksiyasi
 def main():
     # Bot tokeni shu yerga yozing
-    TOKEN = "YOUR_BOT_TOKEN_HERE"
+    TOKEN = "7289422688:AAF6s2dq-n9doyGF-4jSfRvkYnbb6o9cNoM"
 
     # Applicationni allowed_updates bilan ishga tushirish
     application = Application.builder().token(TOKEN).allowed_updates(["message"]).build()
@@ -36,4 +36,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
