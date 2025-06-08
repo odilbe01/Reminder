@@ -1,15 +1,12 @@
-import logging
 from telegram import Update
 from telegram.ext import Application, MessageHandler, ContextTypes, filters
+import logging
 
-# Loglarni sozlash
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+# Logging setup
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ⚠️ New Load Alert'ga reply beruvchi handler
+# Message handler function
 async def handle_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or update.message.caption or "").upper()
     logger.info(f"Received message: {text}")
@@ -20,18 +17,17 @@ async def handle_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         logger.info("✅ Replied to 'New Load Alert'")
 
-# Asosiy ishga tushirish funksiyasi
+# Main function
 def main():
-    # Bot tokeni shu yerga yozing
-    TOKEN = "7289422688:AAF6s2dq-n9doyGF-4jSfRvkYnbb6o9cNoM"
+    TOKEN = "7289422688:AAF6s2dq-n9doyGF-4J5fRvkYnbb6o9cNoM"
 
-    # Applicationni allowed_updates bilan ishga tushirish
-    application = Application.builder().token(TOKEN).allowed_updates(["message"]).build()
+    # Start application
+    application = Application.builder().token(TOKEN).build()
 
-    # filters.ALL orqali barcha xabarlarni qabul qilamiz
+    # Catch all messages, even from other bots
     application.add_handler(MessageHandler(filters.ALL, handle_all_messages))
 
-    # Botni ishga tushirish
+    # Start polling
     application.run_polling()
 
 if __name__ == "__main__":
