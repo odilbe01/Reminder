@@ -1,121 +1,39 @@
-import asyncio
-import json
-import os
-from datetime import datetime
-from aiogram import Bot, Dispatcher, types
-from aiogram.enums.chat_member_status import ChatMemberStatus
-from aiogram.filters import ChatMemberUpdatedFilter
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-import pytz
+import logging
+from telegram import Update
+from telegram.ext import Application, MessageHandler, ContextTypes, filters
 
-API_TOKEN = os.getenv("API_TOKEN")
-TIMEZONE = pytz.timezone("America/New_York")
-GROUP_FILE = "groups.json"
+# Loglarni sozlash
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher()
-scheduler = AsyncIOScheduler(timezone=TIMEZONE)
+# ⚠️ New Load Alert'ga reply beruvchi handler
+async def handle_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or update.message.caption or "").upper()
+    logger.info(f"Received message: {text}")
 
-DAILY_REMINDER = """🟨 📅 DAILY UPDATER TASK REMINDER 🟨
-👇 Please read and follow carefully every day!
+    if "NEW LOAD ALERT" in text:
+        await update.message.reply_text(
+            "Please check all post trucks, the driver was covered! It takes just few seconds, let's do!"
+        )
+        logger.info("✅ Replied to 'New Load Alert'")
 
-🔰 1. NEW DRIVER PROCEDURE
-🆕 When a new driver joins the company:
-✅ Check in the Relay App if the driver is verified.
-✅ Confirm with the Safety Team (G2G message) in the group.
-📲 Make sure the driver is taught how to use the Amazon Relay App, follow on-time PU/DEL, and explain the company charges (Timestamp info too).
+# Asosiy ishga tushirish funksiyasi
+def main():
+    # Bot tokeni shu yerga yozing
+    TOKEN = "YOUR_BOT_TOKEN_HERE"
 
-📋 2. DAILY LOAD FOLLOW-UP
-🚚 As soon as dispatch gets a load:
-✅ Update the driver’s status on the Planning Board immediately
-✅ Confirm there is no reserve on the load
-✅ Check if Loadfetcher dispatched PU/DEL times correctly
-👥 Mention whether it's a Solo or Team load
+    # Applicationni allowed_updates bilan ishga tushirish
+    application = Application.builder().token(TOKEN).allowed_updates(["message"]).build()
 
-🚫 Manually check for restricted roads at all stops:
-• 📣 If there’s a restricted road, send it to the Restriction Group
-• 👤 Mention Driver Name + VRID
-• ☎️ When 15 miles away from restricted area, call the driver and inform about restricted road or no parking zone
+    # filters.ALL orqali barcha xabarlarni qabul qilamiz
+    application.add_handler(MessageHandler(filters.ALL, handle_all_messages))
 
-📨 When you send a load to the driver:
-✅ Get confirmation: “Did you receive the load info?”
-
-💵 If you added/reserved any amount:
-✅ Send to Reserve Group
-✅ Mention it on the Gross Board
-
-⚠️ If the driver will be charged:
-✅ Notify in the Charge Group
-
-🆘 If you created a case on Amazon:
-✅ Send Case Number, Driver Name, and Load Number to the Case Group
-
-📧 Check all main company emails every hour for any updates or issues
-
-🕑 Every 2 hours, send #update to the group and:
-✅ Track if the driver is on time
-
-🙋‍♂️ If you don’t know the answer to a driver’s question:
-🟡 Just say (CHECKING) in the group and follow up later or ask dispatch
-
-📍 3. LIVE DRIVER TRACKING & AMAZON UPDATES
-🛰 Track drivers in real time!
-🧭 Check Deadhead (DH) miles
-
-⚠️ Update Amazon immediately if driver faces any issue:
-• 🛑 Road/facility closure
-• 🚧 Traffic delays
-• 🚫 Wrong trailer or seal
-• ❗️No empty trailer
-• 🕒 Load marked “loading” but departure time passed
-"""
-
-REPLY_MESSAGE = "Please check all post trucks, the driver was covered! It takes just few seconds, let's do!"
-
-def save_chat_id(chat_id):
-    if os.path.exists(GROUP_FILE):
-        with open(GROUP_FILE, 'r') as f:
-            group_ids = json.load(f)
-    else:
-        group_ids = []
-
-    if chat_id not in group_ids:
-        group_ids.append(chat_id)
-        with open(GROUP_FILE, 'w') as f:
-            json.dump(group_ids, f)
-
-def load_group_ids():
-    if os.path.exists(GROUP_FILE):
-        with open(GROUP_FILE, 'r') as f:
-            return json.load(f)
-    return []
-
-async def send_reminder():
-    group_ids = load_group_ids()
-    for chat_id in group_ids:
-        try:
-            await bot.send_message(chat_id, DAILY_REMINDER)
-        except Exception as e:
-            print(f"[X] Failed to send to {chat_id}: {e}")
-
-scheduler.add_job(send_reminder, 'cron', hour=0, minute=0)
-scheduler.add_job(send_reminder, 'cron', hour=8, minute=0)
-scheduler.add_job(send_reminder, 'cron', hour=16, minute=0)
-
-@dp.chat_member(ChatMemberUpdatedFilter(member_status_changed=True))
-async def on_new_group(event: types.ChatMemberUpdated):
-    if event.new_chat_member.status == ChatMemberStatus.MEMBER:
-        save_chat_id(event.chat.id)
-        await bot.send_message(event.chat.id, "✅ Bot added! Daily reminder will now be sent automatically.")
-
-@dp.message()
-async def handle_message(message: types.Message):
-    if message.text and "⚠️ New Load Alert" in message.text:
-        await message.reply(REPLY_MESSAGE)
-
-async def main():
-    scheduler.start()
-    await dp.start_polling(bot)
+    # Botni ishga tushirish
+    application.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
+
