@@ -22,12 +22,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     lines = text.splitlines()
 
+    # ⚠️ New Load Alert javobi
     if "⚠️ New Load Alert" in text:
         await update.message.reply_text(
             "Please check all post trucks, the driver was covered! It takes just few seconds, let's do!"
         )
         return
 
+    # Reminder scheduling
     if len(lines) >= 2 and re.match(TIME_PATTERN, lines[0]) and re.search(OFFSET_PATTERN, lines[1]):
         time_str = lines[0].strip()
         offset_match = re.search(OFFSET_PATTERN, lines[1].strip())
@@ -67,3 +69,5 @@ if __name__ == "__main__":
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.run_polling()
+
+
