@@ -3,7 +3,7 @@ import logging
 import re
 import unicodedata
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 
 from telegram import Update
 from telegram.constants import ParseMode
@@ -19,6 +19,9 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger("tripbot")
+
+# Store the last seen Trip post per chat so 'Add/Minus' works even without a reply
+CHAT_LAST_TRIP: Dict[int, str] = {}
 
 # -----------------------------
 # Utility helpers
@@ -148,6 +151,11 @@ async def on_any_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     # 1) If a Trip post appears, auto‑reply with two guidance prompts
     if looks_like_trip_post(text):
+        # Remember this Trip post for this chat
+        try:
+            CHAT_LAST_TRIP[msg.chat_id] = text
+        except Exception:
+            pass
         try:
             await msg.reply_text(TRIP_PROMPT_1)
             await msg.reply_text(TRIP_PROMPT_2)
@@ -158,14 +166,18 @@ async def on_any_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # 2) If someone replies 'Add X' or 'Minus X' to a Trip message, recompute
     folded_cmd = ascii_fold(text).strip().lower()
     m = re.search(r"\b(add|minus)\s+(-?\d+(?:\.\d{1,2})?)\b", folded_cmd)
-    if m and msg.reply_to_message and msg.reply_to_message.text:
+    if m:
         try:
             op = m.group(1)
             delta = Decimal(m.group(2))
             if op == "minus":
                 delta = -delta
 
-            original_trip_text = msg.reply_to_message.text
+            # Prefer the replied-to Trip message; otherwise, use the last Trip post in this chat
+            if msg.reply_to_message and msg.reply_to_message.text:
+                original_trip_text = msg.reply_to_message.text
+            else:
+                original_trip_text = CHAT_LAST_TRIP.get(msg.chat_id) or ""
 
             base_rate, _old_rpm = parse_first_two_dollar_amounts(original_trip_text)
             miles = parse_trip_miles(original_trip_text)
