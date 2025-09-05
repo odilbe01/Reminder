@@ -254,13 +254,6 @@ TRIP_PROMPT_1 = (
     "It only takes a few seconds—let’s check.\n\n"
     "@dispatchrepublic  @Aziz_157 @d1spa1ch @d1spa1ch_team"
 )
-TRIP_PROMPT_2 = (
-    "Update team !\n\n"
-    "Please ask the dispatch when you need to send the load to the driver.\n"
-    "Assign Driver and Tractor.\n"
-    "If there is RSRV Note that on google sheets and send it to RSRV Group.\n"
-    "@usmon_offc @Alex_W911 @willliam_anderson @S1eve_21."
-)
 
 def looks_like_trip_post(text: str) -> bool:
     folded = ascii_fold(text).lower()
@@ -312,7 +305,7 @@ async def on_any_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await msg.reply_text("❗ PU vaqtini parse qilib bo‘lmadi. Masalan: '5 Sep, 15:40 PDT'.")
             return
 
-    # (B) Trip ID post → ikki prompt
+    # (B) Trip ID post → faqat bitta prompt yuboriladi
     if looks_like_trip_post(text):
         try:
             CHAT_LAST_TRIP[msg.chat_id] = text
@@ -320,9 +313,8 @@ async def on_any_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             pass
         try:
             await msg.reply_text(TRIP_PROMPT_1)
-            await msg.reply_text(TRIP_PROMPT_2)
         except Exception as e:
-            logger.exception("Failed to send trip prompts: %s", e)
+            logger.exception("Failed to send trip prompt: %s", e)
         return
 
     # (C) Add/Minus
@@ -397,16 +389,14 @@ def main() -> None:
     logger.info("Starting TripBot...")
 
     if USE_WEBHOOK and WEBHOOK_URL:
-        # Webhook rejimi: 409 bo‘lmaydi
         app.run_webhook(
             listen="0.0.0.0",
             port=PORT,
             url_path=WEBHOOK_PATH.lstrip("/"),
-            webhook_url=WEBHOOK_URL,          # masalan: https://your-app.onrender.com/telegram-webhook
+            webhook_url=WEBHOOK_URL,
             drop_pending_updates=True,
         )
     else:
-        # Polling rejimi (faqat bitta instance ishlasin!)
         app.run_polling(
             drop_pending_updates=True,
             close_loop=False,
