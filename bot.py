@@ -271,13 +271,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "👋 TripBot is alive.\n\n"
         "• Reply 'Add 100' / 'Minus 100' to recalc Rate & $/mi.\n"
         "• Schedule yozish usullari:\n"
-        "  1) Labeled:\n"
+        "  1) PU bilan:\n"
         "     PU: Fri Sep 5 17:50 MDT\n"
         "     1h 5m\n"
-        "  2) Unlabeled (ham text/ham caption bo'ladi):\n"
-        "     Sat Sep 6 12:40 EDT\n"
-        "     5m\n"
-        "  → PU − offset − 5m da avtomatik: “Load will be available on AI soon!”.",
+        "  2) PU bo‘lmasdan:\n"
+        "     Sun Sep 7 09:15 PDT\n"
+        "     1h\n"
+        "  → PU − offset − 5m da: “Load will be available on AI soon!”.",
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -310,7 +310,7 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if pu_dt:
             offs = parse_offset(text)
 
-    # Agar hech bo'lmasa bittasi topilgan bo'lsa, feedback beramiz
+    # Jadval: faqat pu_dt va offs ikkalasi ham bo'lsa schedule; aks holda jim turamiz
     if pu_dt is not None or offs is not None:
         if pu_dt and offs:
             send_at = pu_dt - offs - timedelta(minutes=5)
@@ -326,13 +326,15 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 SCHEDULED[(msg.chat_id, msg.message_id)] = send_at_utc.isoformat()
             except Exception as e:
                 logger.exception("Failed to create schedule: %s", e)
+                # xatolik bo'lsa ham jim turmaymiz, xabar beramiz:
                 await msg.reply_text("⚠️ Could not schedule. Check time & offset.")
             return
+        # pu_dt bor, offs yo‘q → sukut (hech narsa yozmaymiz)
         if pu_dt and not offs:
-            await msg.reply_text("❗ Offset topilmadi. Keyingi qatorda '1h' yoki '5m' yozing.")
             return
+        # offs bor, pu_dt yo‘q → bu holatni ogohlantirib qo‘yamiz (istasa, buni ham jim qilish mumkin)
         if offs and not pu_dt:
-            await msg.reply_text("❗ Vaqtni parse qilib bo‘lmadi. Masalan: 'Sat Sep 6 12:40 EDT'.")
+            await msg.reply_text("❗ Vaqtni parse qilib bo‘lmadi. Masalan: 'Sun Sep 7 09:15 PDT'.")
             return
 
     # (B) Trip ID post → prompt
