@@ -273,7 +273,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• Post (text yoki caption bo‘lishi mumkin):\n"
         "  PU: Fri Sep 5 17:50 MDT\n"
         "  1h 5m\n"
-        "  → PU − offset − 10m da avtomatik: “Load will be available on AI soon!”.",
+        "  → PU − offset − 5m da avtomatik: “Load will be available on AI soon!”.",
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -292,7 +292,7 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         pu_dt = parse_pu_datetime(pu_raw)
         offs = parse_offset(text)
         if pu_dt and offs:
-            send_at = pu_dt - offs - timedelta(minutes=10)
+            send_at = pu_dt - offs - timedelta(minutes=5)
             send_at_utc = send_at.astimezone(timezone.utc)
             try:
                 # "noted" ni darhol yuboramiz
