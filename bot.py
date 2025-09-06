@@ -78,12 +78,21 @@ def ascii_fold(text: str) -> str:
 
 def parse_first_two_dollar_amounts(text: str) -> Tuple[Optional[Decimal], Optional[Decimal]]:
     amounts = re.findall(r"\$\s*([0-9][\d,]*(?:\.[0-9]{1,4})?)", text)
-    if len(amounts) < 2:
-        return None, None
     try:
-        return Decimal(amounts[0].replace(",", "")), Decimal(amounts[1].replace(",", ""))
+        a0 = Decimal(amounts[0].replace(",", "")) if len(amounts) >= 1 else None
+        a1 = Decimal(amounts[1].replace(",", "")) if len(amounts) >= 2 else None
+        return a0, a1
     except Exception:
         return None, None
+
+def parse_first_dollar_amount(text: str) -> Optional[Decimal]:
+    m = re.search(r"\$\s*([0-9][\d,]*(?:\.[0-9]{1,4})?)", text)
+    if not m:
+        return None
+    try:
+        return Decimal(m.group(1).replace(",", ""))
+    except Exception:
+        return None
 
 def parse_trip_miles(text: str) -> Optional[Decimal]:
     m = re.search(r"🚛[\s\S]*?(\d+[\d,]*(?:\.[0-9]{1,3})?)\s*mi\b", text, re.IGNORECASE)
@@ -111,17 +120,25 @@ def update_rate_and_rpm_in_text(original: str, new_rate: Decimal, new_rpm: Decim
             else:
                 if rate_line_idx is None:
                     rate_line_idx = idx
-    if rate_line_idx is None or rpm_line_idx is None:
+    if rate_line_idx is None:
         return None
 
     def repl(line: str, amt: str) -> str:
         return re.sub(r"\$\s*[0-9][\d,]*(?:\.[0-9]{1,4})?", amt, line, count=1)
 
     lines[rate_line_idx] = repl(lines[rate_line_idx], format_money(new_rate))
-    if "/mi" in lines[rpm_line_idx]:
-        lines[rpm_line_idx] = repl(lines[rpm_line_idx], format_money(new_rpm))
+
+    # RPM qatori bo'lmasa ham qo'shib yuboramiz
+    if rpm_line_idx is not None:
+        if "/mi" in lines[rpm_line_idx]:
+            lines[rpm_line_idx] = repl(lines[rpm_line_idx], format_money(new_rpm))
+        else:
+            lines[rpm_line_idx] = repl(lines[rpm_line_idx], format_money(new_rpm) + "/mi")
     else:
-        lines[rpm_line_idx] = repl(lines[rpm_line_idx], format_money(new_rpm) + "/mi")
+        # Birinchi 💰 qatordan keyin RPM ni qo'shamiz
+        insert_at = rate_line_idx + 1
+        lines.insert(insert_at, f" 💰 𝗣𝗲𝗿 𝗺𝗶𝗹𝗲: {format_money(new_rpm)}/mi")
+
     return "\n".join(lines)
 
 # -----------------------------
@@ -269,14 +286,10 @@ def get_message_text(update: Update) -> str:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "👋 TripBot is alive.\n\n"
-        "• Reply 'Add 100' / 'Minus 100' to recalc Rate & $/mi.\n"
-        "• Schedule yozish usullari:\n"
-        "  1) PU bilan:\n"
-        "     PU: Fri Sep 5 17:50 MDT\n"
-        "     1h 5m\n"
-        "  2) PU bo‘lmasdan:\n"
-        "     Sun Sep 7 09:15 PDT\n"
-        "     1h\n"
+        "• Reply 'Add 100' / 'Minus 100' (yoki 'Add100') — Rate & $/mi qayta hisoblanadi.\n"
+        "• Schedule (PU shartsiz):\n"
+        "  Sun Sep 7 09:15 PDT\n"
+        "  1h\n"
         "  → PU − offset − 5m da: “Load will be available on AI soon!”.",
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -289,16 +302,12 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not text:
         return
 
-    # (A) PU + offset → schedule (text/caption/forward ham)
+    # -------- (A) Schedule: faqat vaqt (pu_dt) topilsa ishlaydi --------
     pu_dt: Optional[datetime] = None
-    offs: Optional[timedelta] = None
-
-    # 1) Avval labeled "PU:" formatini sinab ko'ramiz
+    # 1) Labeled "PU:" bo'lsa
     pu_line_m = PU_LINE_RE.search(text)
     if pu_line_m:
-        pu_raw = pu_line_m.group(1).strip()
-        pu_dt = parse_pu_datetime(pu_raw)
-        offs = parse_offset(text)
+        pu_dt = parse_pu_datetime(pu_line_m.group(1).strip())
     else:
         # 2) Unlabeled: xabardagi birinchi parse bo'ladigan datetime qatordan olinadi
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
@@ -307,12 +316,10 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             if dt_try:
                 pu_dt = dt_try
                 break
-        if pu_dt:
-            offs = parse_offset(text)
 
-    # Jadval: faqat pu_dt va offs ikkalasi ham bo'lsa schedule; aks holda jim turamiz
-    if pu_dt is not None or offs is not None:
-        if pu_dt and offs:
+    if pu_dt:
+        offs = parse_offset(text)
+        if offs:
             send_at = pu_dt - offs - timedelta(minutes=5)
             send_at_utc = send_at.astimezone(timezone.utc)
             try:
@@ -326,18 +333,11 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 SCHEDULED[(msg.chat_id, msg.message_id)] = send_at_utc.isoformat()
             except Exception as e:
                 logger.exception("Failed to create schedule: %s", e)
-                # xatolik bo'lsa ham jim turmaymiz, xabar beramiz:
                 await msg.reply_text("⚠️ Could not schedule. Check time & offset.")
             return
-        # pu_dt bor, offs yo‘q → sukut (hech narsa yozmaymiz)
-        if pu_dt and not offs:
-            return
-        # offs bor, pu_dt yo‘q → bu holatni ogohlantirib qo‘yamiz (istasa, buni ham jim qilish mumkin)
-        if offs and not pu_dt:
-            await msg.reply_text("❗ Vaqtni parse qilib bo‘lmadi. Masalan: 'Sun Sep 7 09:15 PDT'.")
-            return
+        # offs yo'q bo'lsa — sukut (hech narsa demaymiz) va boshqa funksiyalarga o'tamiz
 
-    # (B) Trip ID post → prompt
+    # -------- (B) Trip ID post → prompt --------
     if looks_like_trip_post(text):
         CHAT_LAST_TRIP[msg.chat_id] = text
         try:
@@ -346,9 +346,9 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             logger.exception("Failed to send trip prompt: %s", e)
         return
 
-    # (C) Add/Minus
+    # -------- (C) Add/Minus --------
     folded_cmd = ascii_fold(text).lower()
-    m = re.search(r"\b(add|minus)\s+(-?\d+(?:\.\d{1,2})?)\b", folded_cmd)
+    m = re.search(r"\b(add|minus)\s*([+-]?\d+(?:\.\d{1,2})?)\b", folded_cmd)
     if m:
         try:
             op = m.group(1)
@@ -359,22 +359,28 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 original_trip_text = (msg.reply_to_message.text or msg.reply_to_message.caption or "")
             else:
                 original_trip_text = CHAT_LAST_TRIP.get(msg.chat_id) or ""
-            base_rate, _ = parse_first_two_dollar_amounts(original_trip_text)
+
+            # Endi bitta $ bo'lsa ham yetadi
+            base_rate = parse_first_dollar_amount(original_trip_text)
             miles = parse_trip_miles(original_trip_text)
+
             if base_rate is None or miles is None or miles == 0:
                 await msg.reply_text("❗ Rate/Miles topilmadi. '💰 Rate: $123.45' va '🚛 Trip: 431.63mi' bo‘lsin.")
                 return
+
             new_rate = (base_rate + delta).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             new_rpm = (new_rate / miles).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
             updated_text = update_rate_and_rpm_in_text(original_trip_text, new_rate, new_rpm)
             if not updated_text:
+                # Fallback — Rate satrini yangilab, Per mile qo'shamiz
                 updated_text = re.sub(
                     r"(?m)^.*💰[\s\S]*?\$[0-9][\d,]*(?:\.[0-9]{1,4})?.*$",
                     f"💰 𝗥𝗮𝘁𝗲: {format_money(new_rate)}",
                     original_trip_text,
                     count=1,
                 )
-                if "Per mile" in ascii_fold(updated_text):
+                if "Per mile" in ascii_fold(updated_text).lower():
                     updated_text = re.sub(
                         r"(?m)^.*💰[\s\S]*?\$[0-9][\d,]*(?:\.[0-9]{1,4})?.*/mi.*$",
                         f"💰 𝗣𝗲𝗿 𝗺𝗶𝗹𝗲: {format_money(new_rpm)}/mi",
@@ -390,6 +396,7 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                             break
                     parts.insert(insert_at, f" 💰 𝗣𝗲𝗿 𝗺𝗶𝗹𝗲: {format_money(new_rpm)}/mi")
                     updated_text = "\n".join(parts)
+
             await msg.reply_text(updated_text)
         except Exception as e:
             logger.exception("Failed to update rate: %s", e)
