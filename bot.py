@@ -271,7 +271,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "👋 TripBot is alive.\n\n"
         "• Reply 'Add 100' / 'Minus 100' to recalc Rate & $/mi.\n"
         "• Post (text yoki caption bo‘lishi mumkin):\n"
-        "  PU: Fri Sep 5 17:50 MDT\n"
+        "  Fri Sep 5 17:50 MDT\n"
         "  1h 5m\n"
         "  → PU − offset − 5m da avtomatik: “Load will be available on AI soon!”.",
         parse_mode=ParseMode.MARKDOWN,
