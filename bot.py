@@ -271,7 +271,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "👋 TripBot is alive.\n\n"
         "• Reply 'Add 100' / 'Minus 100' to recalc Rate & $/mi.\n"
         "• Schedule yozish usullari:\n"
-        "  1) Labeled: \n"
+        "  1) Labeled:\n"
         "     PU: Fri Sep 5 17:50 MDT\n"
         "     1h 5m\n"
         "  2) Unlabeled (ham text/ham caption bo'ladi):\n"
