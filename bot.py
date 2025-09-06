@@ -145,7 +145,7 @@ def _tz_to_zoneinfo(abbr: str):
 
 def parse_pu_datetime(pu_str: str) -> Optional[datetime]:
     """
-    Quyidagi ko'rinishlarni qo'llab-quvvatlaydi:
+    Qo'llab-quvvatlanadi:
     - 5 Sep, 15:40 PDT
     - Sep 5, 15:40 PDT
     - Fri Sep 5 17:50 MDT   (hafta kuni ixtiyoriy)
@@ -270,9 +270,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "👋 TripBot is alive.\n\n"
         "• Reply 'Add 100' / 'Minus 100' to recalc Rate & $/mi.\n"
-        "• Post (text yoki caption bo‘lishi mumkin):\n"
-        "  Fri Sep 5 17:50 MDT\n"
-        "  1h 5m\n"
+        "• Schedule yozish usullari:\n"
+        "  1) Labeled: \n"
+        "     PU: Fri Sep 5 17:50 MDT\n"
+        "     1h 5m\n"
+        "  2) Unlabeled (ham text/ham caption bo'ladi):\n"
+        "     Sat Sep 6 12:40 EDT\n"
+        "     5m\n"
         "  → PU − offset − 5m da avtomatik: “Load will be available on AI soon!”.",
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -286,16 +290,32 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     # (A) PU + offset → schedule (text/caption/forward ham)
+    pu_dt: Optional[datetime] = None
+    offs: Optional[timedelta] = None
+
+    # 1) Avval labeled "PU:" formatini sinab ko'ramiz
     pu_line_m = PU_LINE_RE.search(text)
     if pu_line_m:
         pu_raw = pu_line_m.group(1).strip()
         pu_dt = parse_pu_datetime(pu_raw)
         offs = parse_offset(text)
+    else:
+        # 2) Unlabeled: xabardagi birinchi parse bo'ladigan datetime qatordan olinadi
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        for ln in lines:
+            dt_try = parse_pu_datetime(ln)
+            if dt_try:
+                pu_dt = dt_try
+                break
+        if pu_dt:
+            offs = parse_offset(text)
+
+    # Agar hech bo'lmasa bittasi topilgan bo'lsa, feedback beramiz
+    if pu_dt is not None or offs is not None:
         if pu_dt and offs:
             send_at = pu_dt - offs - timedelta(minutes=5)
             send_at_utc = send_at.astimezone(timezone.utc)
             try:
-                # "noted" ni darhol yuboramiz
                 await msg.reply_text("noted")
                 await schedule_ai_available_msg(
                     when_dt_utc=send_at_utc,
@@ -306,13 +326,13 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 SCHEDULED[(msg.chat_id, msg.message_id)] = send_at_utc.isoformat()
             except Exception as e:
                 logger.exception("Failed to create schedule: %s", e)
-                await msg.reply_text("⚠️ Could not schedule. Check PU time & offset.")
+                await msg.reply_text("⚠️ Could not schedule. Check time & offset.")
             return
         if pu_dt and not offs:
-            await msg.reply_text("❗ Offset topilmadi. Keyingi qatorda '1h' yoki '1h 5m' yozing.")
+            await msg.reply_text("❗ Offset topilmadi. Keyingi qatorda '1h' yoki '5m' yozing.")
             return
         if offs and not pu_dt:
-            await msg.reply_text("❗ PU vaqtini parse qilib bo‘lmadi. Masalan: 'Fri Sep 5 17:50 MDT'.")
+            await msg.reply_text("❗ Vaqtni parse qilib bo‘lmadi. Masalan: 'Sat Sep 6 12:40 EDT'.")
             return
 
     # (B) Trip ID post → prompt
