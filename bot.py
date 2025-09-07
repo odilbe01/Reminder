@@ -142,30 +142,53 @@ def update_rate_and_rpm_in_text(original: str, new_rate: Decimal, new_rpm: Decim
     return "\n".join(lines)
 
 # =============================
-# YANGI: qat'iy formatdagi Rate + RPM %larga ko'paytirib qaytarish
-# Faqat ikki qatorlik aniq format:
-#   $2,670.02
-#   $1.26/mi
-# Qo'shimcha matn bo'lsa — indamaydi (triggermaydi)
+# FLEX: 1 yoki 2 qatorda (faqat sonlar) — $ ixtiyoriy, /mi ixtiyoriy
+# Ortiqcha gap bo‘lsa (3+ qatordan biri ham matn bo‘lsa) triggermaydi
 # =============================
-STRICT_RATE_RE = re.compile(r"^\s*\$\s*([0-9][\d,]*(?:\.[0-9]{1,4})?)\s*$")
-STRICT_RPM_RE  = re.compile(r"^\s*\$\s*([0-9][\d,]*(?:\.[0-9]{1,4})?)\s*/\s*mi\s*$", re.IGNORECASE)
+RPM_DECISION_MAX = Decimal("25")  # bitta son bo‘lsa: <=25 -> RPM deb qabul qilamiz
 
-def _parse_strict_rate_rpm(text: str) -> Optional[Tuple[Decimal, Decimal]]:
-    # Faqat 2 ta not-empty qator bo‘lishi shart
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip() != ""]
-    if len(lines) != 2:
+ANY_AMOUNT_RE = re.compile(r"^\s*\$?\s*([0-9][\d,]*(?:\.[0-9]{1,4})?)\s*(?:/mi)?\s*$", re.IGNORECASE)
+HAS_PER_MI_RE = re.compile(r"/\s*mi\b", re.IGNORECASE)
+
+def _parse_flex_rate_rpm(text: str) -> Optional[Tuple[Optional[Decimal], Optional[Decimal]]]:
+    """
+    Qabul qilinadigan ko‘rinishlar (faqat 1 yoki 2 qatorda son(+$)/mi):
+      1) 2 qator: birinchisini rate, ikkinchisini rpm deb olamiz (yoki '/mi' bo'lsa avtomatik ajratamiz)
+      2) 1 qator: qiymat <= 25 bo'lsa rpm, aks holda rate
+    Aks holda None (triggermaydi).
+    """
+    raw_lines = [ln.strip() for ln in text.splitlines()]
+    lines = [ln for ln in raw_lines if ln != ""]
+    if len(lines) == 0 or len(lines) > 2:
         return None
-    m1 = STRICT_RATE_RE.match(lines[0])
-    m2 = STRICT_RPM_RE.match(lines[1])
-    if not (m1 and m2):
+    # Barcha qatorlar faqat son(+$)/mi formatida bo‘lsin
+    if any(not ANY_AMOUNT_RE.match(ln) for ln in lines):
         return None
-    try:
-        rate = Decimal(m1.group(1).replace(",", ""))
-        rpm  = Decimal(m2.group(1).replace(",", ""))
-        return rate, rpm
-    except Exception:
-        return None
+
+    def to_dec(s: str) -> Decimal:
+        m = re.search(r"([0-9][\d,]*(?:\.[0-9]{1,4})?)", s)
+        return Decimal(m.group(1).replace(",", ""))  # type: ignore
+
+    if len(lines) == 2:
+        l1, l2 = lines
+        l1_permi = bool(HAS_PER_MI_RE.search(l1))
+        l2_permi = bool(HAS_PER_MI_RE.search(l2))
+        v1, v2 = to_dec(l1), to_dec(l2)
+        if l1_permi and not l2_permi:
+            return (v2, v1)  # (rate, rpm)
+        if l2_permi and not l1_permi:
+            return (v1, v2)
+        return (v1, v2)  # ikkalasida ham /mi yo‘q yoki ikkalasida ham bor — 1-chi rate, 2-chi rpm
+
+    # len(lines) == 1
+    l = lines[0]
+    v = to_dec(l)
+    if HAS_PER_MI_RE.search(l):
+        return (None, v)  # faqat rpm
+    if v <= RPM_DECISION_MAX:
+        return (None, v)  # rpm
+    else:
+        return (v, None)  # rate
 
 def _fmt_money(dec: Decimal) -> str:
     return f"${dec.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)}"
@@ -183,20 +206,34 @@ RATE_REASON = (
     "we need a higher rate to service this lane reliably"
 )
 
-def build_percentage_reply(base_rate: Decimal, base_rpm: Decimal) -> str:
-    # 10, 13, 15, 25 -> "AI"; 30 -> "Broker"
+def build_percentage_reply_flex(base_rate: Optional[Decimal], base_rpm: Optional[Decimal]) -> str:
     percents = [10, 13, 15, 25, 30]
     chunks = []
     for p in percents:
         label = "Broker" if p == 30 else "AI"
         mult = Decimal(1) + (Decimal(p) / Decimal(100))
-        new_rate = (base_rate * mult).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        new_rpm  = (base_rpm  * mult).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        # 1-qator: "10% AI $110.00 /$2.20/mi"  (namuna shakliga mos)
-        line1 = f"{p}% {label} {_fmt_money(new_rate)} /{_fmt_rpm(new_rpm)}/mi"
-        # 2-qator: "110 Due to record fuel costs, ..."
-        line2 = f"{_strip_trailing_zeros(new_rate)} {RATE_REASON}"
-        chunks.append(f"{line1}\n{line2}")
+
+        new_rate = (base_rate * mult).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) if base_rate is not None else None
+        new_rpm  = (base_rpm  * mult).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) if base_rpm  is not None else None
+
+        # 1-qatorni yasash
+        parts = [f"{p}% {label}"]
+        if new_rate is not None and new_rpm is not None:
+            parts.append(f"{_fmt_money(new_rate)} /{_fmt_rpm(new_rpm)}/mi")
+        elif new_rate is not None:
+            parts.append(f"{_fmt_money(new_rate)}")
+        elif new_rpm is not None:
+            parts.append(f"{_fmt_rpm(new_rpm)}/mi")
+        line1 = " ".join(parts)
+
+        # 2-qator: mavjud qiymatdan birini chiqaramiz (rate bo‘lsa o‘sha, bo‘lmasa rpm)
+        shown = new_rate if new_rate is not None else new_rpm
+        if shown is not None:
+            line2 = f"{_strip_trailing_zeros(shown)} {RATE_REASON}"
+            chunks.append(f"{line1}\n{line2}")
+        else:
+            chunks.append(line1)
+
     return "\n\n".join(chunks)
 
 # -----------------------------
@@ -360,17 +397,22 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not text:
         return
 
-    # -------- (NEW) Strict Rate/RPM foiz hisob --------
-    strict = _parse_strict_rate_rpm(text)
-    if strict:
-        base_rate, base_rpm = strict
+    # -------- (NEW) Flexible Rate/RPM foiz hisob --------
+    try:
+        parsed = _parse_flex_rate_rpm(text)
+    except Exception as e:
+        logger.exception("Flex parser failed: %s", e)
+        parsed = None
+
+    if parsed:
+        base_rate, base_rpm = parsed
         try:
-            reply = build_percentage_reply(base_rate, base_rpm)
+            reply = build_percentage_reply_flex(base_rate, base_rpm)
             await msg.reply_text(reply)
         except Exception as e:
-            logger.exception("Strict rate/rpm reply failed: %s", e)
+            logger.exception("Flex rate/rpm reply failed: %s", e)
         return
-    # --------------------------------------------------
+    # ----------------------------------------------------
 
     # -------- (A) Schedule: faqat vaqt (pu_dt) topilsa ishlaydi --------
     pu_dt: Optional[datetime] = None
@@ -506,3 +548,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
