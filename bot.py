@@ -141,6 +141,64 @@ def update_rate_and_rpm_in_text(original: str, new_rate: Decimal, new_rpm: Decim
 
     return "\n".join(lines)
 
+# =============================
+# YANGI: qat'iy formatdagi Rate + RPM %larga ko'paytirib qaytarish
+# Faqat ikki qatorlik aniq format:
+#   $2,670.02
+#   $1.26/mi
+# Qo'shimcha matn bo'lsa — indamaydi (triggermaydi)
+# =============================
+STRICT_RATE_RE = re.compile(r"^\s*\$\s*([0-9][\d,]*(?:\.[0-9]{1,4})?)\s*$")
+STRICT_RPM_RE  = re.compile(r"^\s*\$\s*([0-9][\d,]*(?:\.[0-9]{1,4})?)\s*/\s*mi\s*$", re.IGNORECASE)
+
+def _parse_strict_rate_rpm(text: str) -> Optional[Tuple[Decimal, Decimal]]:
+    # Faqat 2 ta not-empty qator bo‘lishi shart
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip() != ""]
+    if len(lines) != 2:
+        return None
+    m1 = STRICT_RATE_RE.match(lines[0])
+    m2 = STRICT_RPM_RE.match(lines[1])
+    if not (m1 and m2):
+        return None
+    try:
+        rate = Decimal(m1.group(1).replace(",", ""))
+        rpm  = Decimal(m2.group(1).replace(",", ""))
+        return rate, rpm
+    except Exception:
+        return None
+
+def _fmt_money(dec: Decimal) -> str:
+    return f"${dec.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)}"
+
+def _fmt_rpm(dec: Decimal) -> str:
+    return f"${dec.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)}"
+
+def _strip_trailing_zeros(dec: Decimal) -> str:
+    # "110.00" -> "110", "123.40" -> "123.40"
+    s = f"{dec.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)}"
+    return s[:-3] if s.endswith(".00") else s
+
+RATE_REASON = (
+    "Due to record fuel costs, a long/demanding route, and tight capacity in this market, "
+    "we need a higher rate to service this lane reliably"
+)
+
+def build_percentage_reply(base_rate: Decimal, base_rpm: Decimal) -> str:
+    # 10, 13, 15, 25 -> "AI"; 30 -> "Broker"
+    percents = [10, 13, 15, 25, 30]
+    chunks = []
+    for p in percents:
+        label = "Broker" if p == 30 else "AI"
+        mult = Decimal(1) + (Decimal(p) / Decimal(100))
+        new_rate = (base_rate * mult).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        new_rpm  = (base_rpm  * mult).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        # 1-qator: "10% AI $110.00 /$2.20/mi"  (namuna shakliga mos)
+        line1 = f"{p}% {label} {_fmt_money(new_rate)} /{_fmt_rpm(new_rpm)}/mi"
+        # 2-qator: "110 Due to record fuel costs, ..."
+        line2 = f"{_strip_trailing_zeros(new_rate)} {RATE_REASON}"
+        chunks.append(f"{line1}\n{line2}")
+    return "\n\n".join(chunks)
+
 # -----------------------------
 # PU + offset parsing & scheduling
 # -----------------------------
@@ -301,6 +359,18 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     text = get_message_text(update)
     if not text:
         return
+
+    # -------- (NEW) Strict Rate/RPM foiz hisob --------
+    strict = _parse_strict_rate_rpm(text)
+    if strict:
+        base_rate, base_rpm = strict
+        try:
+            reply = build_percentage_reply(base_rate, base_rpm)
+            await msg.reply_text(reply)
+        except Exception as e:
+            logger.exception("Strict rate/rpm reply failed: %s", e)
+        return
+    # --------------------------------------------------
 
     # -------- (A) Schedule: faqat vaqt (pu_dt) topilsa ishlaydi --------
     pu_dt: Optional[datetime] = None
