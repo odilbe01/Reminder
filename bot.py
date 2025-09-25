@@ -246,12 +246,15 @@ def parse_pu_datetime(pu_str: str) -> Optional[datetime]:
     - Sep 5, 15:40 PDT
     - Fri Sep 5 17:50 MDT
     - Fri Sep 26 02:30 CDT
+    - 06:22 AM, 09-26-25, EDT    (YANGI)
     """
     s = pu_str.strip()
 
+    # TZ (abbr) ni topish
     tz_m = re.search(r"\b([A-Za-z]{2,4})\s*$", s)
     tzinfo = _tz_to_zoneinfo(tz_m.group(1)) if tz_m else None
 
+    # 1) dateutil bo'lsa — avval shuni sinaymiz
     if du_parser:
         default_year = datetime.now(timezone.utc).astimezone().year
         base = datetime(default_year, 1, 1, 0, 0, 0)
@@ -266,27 +269,58 @@ def parse_pu_datetime(pu_str: str) -> Optional[datetime]:
         except Exception:
             pass
 
+    # 2) Fallback regexlar
+
+    # (a) Eski formatlar (weekday ixtiyoriy)
     WEEKDAY_OPT = r"(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s*,?\s+)?"
     pat1 = rf"(?i)^{WEEKDAY_OPT}(?P<d>\d{{1,2}})\s+(?P<mon>[A-Za-z]{{3}}),?\s+(?P<h>\d{{1,2}}):(?P<mi>\d{{2}})\s+(?P<tz>[A-Za-z]{{2,4}})\s*$"
     pat2 = rf"(?i)^{WEEKDAY_OPT}(?P<mon>[A-Za-z]{{3}})\s+(?P<d>\d{{1,2}}),?\s+(?P<h>\d{{1,2}}):(?P<mi>\d{{2}})\s+(?P<tz>[A-Za-z]{{2,4}})\s*$"
 
     mm = re.search(pat1, s) or re.search(pat2, s)
-    if not mm:
-        return None
+    if mm:
+        mon_str = mm.group("mon").lower()
+        mon = MONTH_ABBR.get(mon_str)
+        if not mon:
+            return None
+        day = int(mm.group("d"))
+        hour = int(mm.group("h"))
+        minute = int(mm.group("mi"))
+        tz_abbr = mm.group("tz").upper()
+        tzinfo2 = _tz_to_zoneinfo(tz_abbr) or timezone.utc
+        year = datetime.now(tzinfo2).year
+        try:
+            return datetime(year, mon, day, hour, minute, tzinfo=tzinfo2)
+        except Exception:
+            return None
 
-    mon = MONTH_ABBR.get(mm.group("mon").lower())
-    if not mon:
-        return None
-    day = int(mm.group("d"))
-    hour = int(mm.group("h"))
-    minute = int(mm.group("mi"))
-    tz_abbr = mm.group("tz").upper()
-    tzinfo = _tz_to_zoneinfo(tz_abbr) or timezone.utc
-    year = datetime.now(tzinfo).year
-    try:
-        return datetime(year, mon, day, hour, minute, tzinfo=tzinfo)
-    except Exception:
-        return None
+    # (b) YANGI format: "06:22 AM, 09-26-25, EDT"
+    #    12-soatlik vaqt, MM-DD-YY, TZ
+    pat3 = r"(?i)^\s*(?P<h>\d{1,2}):(?P<mi>\d{2})\s*(?P<ampm>AM|PM)\s*,\s*(?P<mon>\d{1,2})-(?P<day>\d{1,2})-(?P<yy>\d{2})\s*,\s*(?P<tz>[A-Za-z]{2,4})\s*$"
+    m3 = re.search(pat3, s)
+    if m3:
+        hour12 = int(m3.group("h"))
+        minute = int(m3.group("mi"))
+        ampm = m3.group("ampm").upper()
+        mon = int(m3.group("mon"))
+        day = int(m3.group("day"))
+        yy = int(m3.group("yy"))
+        # YY -> YYYY: 00–69 => 2000–2069, 70–99 => 1970–1999
+        year = 2000 + yy if yy <= 69 else 1900 + yy
+
+        # 12h -> 24h
+        if hour12 == 12:
+            hour = 0 if ampm == "AM" else 12
+        else:
+            hour = hour12 if ampm == "AM" else hour12 + 12
+
+        tz_abbr = m3.group("tz").upper()
+        tzinfo3 = _tz_to_zoneinfo(tz_abbr) or timezone.utc
+        try:
+            return datetime(year, mon, day, hour, minute, tzinfo=tzinfo3)
+        except Exception:
+            return None
+
+    return None
 
 def parse_offset(text: str) -> Optional[timedelta]:
     for line in text.splitlines():
@@ -423,7 +457,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "👋 TripBot is alive.\n\n"
         "• Reply 'Add 100' / 'Minus 100' — Rate & $/mi qayta hisoblanadi.\n"
         "• Schedule:\n"
-        "  Fri Sep 26 02:30 CDT (caption yoki text)\n"
+        "  Fri Sep 26 02:30 CDT yoki 06:22 AM, 09-26-25, EDT (caption yoki text)\n"
         "  → 12h/9h/... ni tanlang (bir nechta ham bo'ladi), so'ng Submit.\n"
         "  Bot: har biri uchun PU − offset − 5m vaqtda xabar yuboradi.\n"
         "  Agar keyingi qatorda '6h' yozsangiz, shu offset bilan darhol schedule bo'ladi.",
