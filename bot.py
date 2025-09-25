@@ -4,7 +4,7 @@ import logging
 import re
 import unicodedata
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, Set
 
 import asyncio
 from datetime import datetime, timedelta, timezone
@@ -23,13 +23,14 @@ try:
 except Exception:
     ZoneInfo = None  # type: ignore
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
     MessageHandler,
     CommandHandler,
+    CallbackQueryHandler,
     filters,
 )
 
@@ -53,6 +54,10 @@ logger = logging.getLogger("tripbot")
 
 CHAT_LAST_TRIP: Dict[int, str] = {}
 SCHEDULED: Dict[Tuple[int, int], str] = {}
+
+# NEW: Interaktiv offset tanlash uchun vaqtinchalik holat
+# token -> {"chat_id": int, "reply_to_msg_id": int, "pu_dt": datetime, "selected": set[str], "keyboard_msg_id": int}
+PENDING_SCHEDULES: Dict[str, Dict] = {}
 
 TZ_ABBR_TO_ZONE = {
     "PST": "America/Los_Angeles", "PDT": "America/Los_Angeles",
@@ -143,20 +148,12 @@ def update_rate_and_rpm_in_text(original: str, new_rate: Decimal, new_rpm: Decim
 
 # =============================
 # FLEX: 1 yoki 2 qatorda (faqat sonlar) — $ ixtiyoriy, /mi ixtiyoriy
-# Ortiqcha gap bo‘lsa (3+ qatordan biri ham matn bo‘lsa) triggermaydi
 # =============================
 RPM_DECISION_MAX = Decimal("25")  # bitta son bo‘lsa: <=25 -> RPM deb qabul qilamiz
-
 ANY_AMOUNT_RE = re.compile(r"^\s*\$?\s*([0-9][\d,]*(?:\.[0-9]{1,4})?)\s*(?:/mi)?\s*$", re.IGNORECASE)
 HAS_PER_MI_RE = re.compile(r"/\s*mi\b", re.IGNORECASE)
 
 def _parse_flex_rate_rpm(text: str) -> Optional[Tuple[Optional[Decimal], Optional[Decimal]]]:
-    """
-    Qabul qilinadigan ko‘rinishlar (faqat 1 yoki 2 qatorda son(+$)/mi):
-      1) 2 qator: birinchisini rate, ikkinchisini rpm deb olamiz (yoki '/mi' bo'lsa avtomatik ajratamiz)
-      2) 1 qator: qiymat <= 25 bo'lsa rpm, aks holda rate
-    Aks holda None (triggermaydi).
-    """
     raw_lines = [ln.strip() for ln in text.splitlines()]
     lines = [ln for ln in raw_lines if ln != ""]
     if len(lines) == 0 or len(lines) > 2:
@@ -226,7 +223,7 @@ def build_percentage_reply_flex(base_rate: Optional[Decimal], base_rpm: Optional
             parts.append(f"{_fmt_rpm(new_rpm)}/mi")
         line1 = " ".join(parts)
 
-        # 2-qator: mavjud qiymatdan birini chiqaramiz (rate bo‘lsa o‘sha, bo‘lmasa rpm)
+        # 2-qator
         shown = new_rate if new_rate is not None else new_rpm
         if shown is not None:
             line2 = f"{_strip_trailing_zeros(shown)} {RATE_REASON}"
@@ -261,6 +258,7 @@ def parse_pu_datetime(pu_str: str) -> Optional[datetime]:
     - 5 Sep, 15:40 PDT
     - Sep 5, 15:40 PDT
     - Fri Sep 5 17:50 MDT   (hafta kuni ixtiyoriy)
+    - Fri Sep 26 02:30 CDT
     """
     s = pu_str.strip()
 
@@ -360,6 +358,44 @@ async def schedule_ai_available_msg(
     logger.warning("JobQueue missing; using asyncio fallback with delay=%ss", delay)
 
 # -----------------------------
+# NEW: Inline keyboard helpers (multi-select + Submit)
+# -----------------------------
+OFFSETS = ["12h", "9h", "8h", "7h", "6h", "2h", "1h"]
+
+def _gen_token() -> str:
+    return os.urandom(6).hex()  # 12 hex chars
+
+def _parse_offset_text(s: str) -> Optional[timedelta]:
+    m = OFFSET_RE.match(s.strip())
+    if not m:
+        return None
+    if not (m.group("h") or m.group("m")):
+        return None
+    return timedelta(hours=int(m.group("h") or 0), minutes=int(m.group("m") or 0))
+
+def _btn_label(lbl: str, selected: Set[str]) -> str:
+    return f"✅ {lbl}" if lbl in selected else lbl
+
+def build_offset_keyboard(token: str, selected: Optional[Set[str]] = None) -> InlineKeyboardMarkup:
+    selected = selected or set()
+    # 2 qator: 12h, 9h, 8h, 7h | 6h, 2h, 1h
+    row1 = [InlineKeyboardButton(_btn_label(t, selected), callback_data=f"ofs2:{token}:{t}") for t in OFFSETS[:4]]
+    row2 = [InlineKeyboardButton(_btn_label(t, selected), callback_data=f"ofs2:{token}:{t}") for t in OFFSETS[4:]]
+    row3 = [InlineKeyboardButton("Submit", callback_data=f"ofs2:{token}:submit")]
+    return InlineKeyboardMarkup([row1, row2, row3])
+
+async def _schedule_with_offset(pu_dt: datetime, offs: timedelta, chat_id: int, reply_to: int, ctx: ContextTypes.DEFAULT_TYPE):
+    send_at = pu_dt - offs - timedelta(minutes=5)
+    send_at_utc = send_at.astimezone(timezone.utc)
+    await schedule_ai_available_msg(
+        when_dt_utc=send_at_utc,
+        chat_id=chat_id,
+        reply_to_message_id=reply_to,
+        context=ctx,
+    )
+    SCHEDULED[(chat_id, reply_to)] = send_at_utc.isoformat()
+
+# -----------------------------
 # Core logic
 # -----------------------------
 TRIP_PROMPT_1 = (
@@ -382,10 +418,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "👋 TripBot is alive.\n\n"
         "• Reply 'Add 100' / 'Minus 100' (yoki 'Add100') — Rate & $/mi qayta hisoblanadi.\n"
-        "• Schedule (PU shartsiz):\n"
-        "  Sun Sep 7 09:15 PDT\n"
-        "  1h\n"
-        "  → PU − offset − 5m da: “Load will be available on AI soon!”.",
+        "• Schedule:\n"
+        "  Fri Sep 26 02:30 CDT  (caption yoki text)\n"
+        "  → Knopkadan 12h/9h/... ni tanlang (bir nechta ham bo'ladi), so'ng Submit.\n"
+        "  Bot: har biri uchun PU − offset − 5m da xabar yuboradi.\n"
+        "  Agar keyingi qatorda '6h' deb yozsangiz, shu offset bilan darhol schedule bo'ladi.",
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -397,7 +434,7 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not text:
         return
 
-    # -------- (NEW) Flexible Rate/RPM foiz hisob --------
+    # -------- Flexible Rate/RPM foiz hisob --------
     try:
         parsed = _parse_flex_rate_rpm(text)
     except Exception as e:
@@ -414,14 +451,12 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     # ----------------------------------------------------
 
-    # -------- (A) Schedule: faqat vaqt (pu_dt) topilsa ishlaydi --------
+    # -------- Schedule: PU sanani aniqlash --------
     pu_dt: Optional[datetime] = None
-    # 1) Labeled "PU:" bo'lsa
     pu_line_m = PU_LINE_RE.search(text)
     if pu_line_m:
         pu_dt = parse_pu_datetime(pu_line_m.group(1).strip())
     else:
-        # 2) Unlabeled: xabardagi birinchi parse bo'ladigan datetime qatordan olinadi
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
         for ln in lines:
             dt_try = parse_pu_datetime(ln)
@@ -430,6 +465,7 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 break
 
     if pu_dt:
+        # Agar matnda offset ham berilgan bo'lsa — darhol schedule
         offs = parse_offset(text)
         if offs:
             send_at = pu_dt - offs - timedelta(minutes=5)
@@ -447,9 +483,26 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 logger.exception("Failed to create schedule: %s", e)
                 await msg.reply_text("⚠️ Could not schedule. Check time & offset.")
             return
-        # offs yo'q bo'lsa — sukut (hech narsa demaymiz) va boshqa funksiyalarga o'tamiz
+        # Aks holda — multi-select klaviatura yuboramiz
+        token = _gen_token()
+        PENDING_SCHEDULES[token] = {
+            "chat_id": msg.chat_id,
+            "reply_to_msg_id": msg.message_id,
+            "pu_dt": pu_dt,
+            "selected": set(),
+            "keyboard_msg_id": None,
+        }
+        try:
+            sent = await msg.reply_text(
+                "Select offsets, then tap Submit:",
+                reply_markup=build_offset_keyboard(token)
+            )
+            PENDING_SCHEDULES[token]["keyboard_msg_id"] = sent.message_id
+        except Exception as e:
+            logger.exception("Failed to send keyboard: %s", e)
+        return
 
-    # -------- (B) Trip ID post → prompt --------
+    # -------- Trip ID post → prompt --------
     if looks_like_trip_post(text):
         CHAT_LAST_TRIP[msg.chat_id] = text
         try:
@@ -458,7 +511,7 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             logger.exception("Failed to send trip prompt: %s", e)
         return
 
-    # -------- (C) Add/Minus --------
+    # -------- Add/Minus --------
     folded_cmd = ascii_fold(text).lower()
     m = re.search(r"\b(add|minus)\s*([+-]?\d+(?:\.\d{1,2})?)\b", folded_cmd)
     if m:
@@ -472,7 +525,6 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             else:
                 original_trip_text = CHAT_LAST_TRIP.get(msg.chat_id) or ""
 
-            # Endi bitta $ bo'lsa ham yetadi
             base_rate = parse_first_dollar_amount(original_trip_text)
             miles = parse_trip_miles(original_trip_text)
 
@@ -515,6 +567,70 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await msg.reply_text("⚠️ Something went wrong while updating the rate.")
 
 # -----------------------------
+# NEW: Callback handler (multi-select + submit)
+# -----------------------------
+async def on_offset_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not q or not q.data or not q.data.startswith("ofs2:"):
+        return
+    try:
+        _prefix, token, choice = q.data.split(":", 2)
+    except Exception:
+        await q.answer("Invalid action.")
+        return
+
+    cfg = PENDING_SCHEDULES.get(token)
+    if not cfg:
+        await q.answer("Expired.")
+        return
+
+    # Toggle & Submit
+    if choice == "submit":
+        selected: Set[str] = cfg.get("selected", set())
+        if not selected:
+            await q.answer("Select at least one offset.")
+            return
+        # Schedule for each selected offset
+        pu_dt: datetime = cfg["pu_dt"]
+        chat_id = cfg["chat_id"]
+        reply_to = cfg["reply_to_msg_id"]
+        try:
+            for off_txt in sorted(selected, key=lambda s: int(s.rstrip("hm").rstrip("h") or "0"), reverse=True):
+                offs = _parse_offset_text(off_txt)
+                if offs:
+                    await _schedule_with_offset(pu_dt, offs, chat_id, reply_to, context)
+            await q.message.reply_text(f"noted ({', '.join(sorted(selected))})")
+        except Exception as e:
+            logger.exception("Failed to schedule from buttons: %s", e)
+            await q.message.reply_text("⚠️ Could not schedule. Check time.")
+        # Clean up & finish
+        PENDING_SCHEDULES.pop(token, None)
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await q.answer("Scheduled.")
+        return
+
+    # Toggle one offset
+    selected: Set[str] = cfg.get("selected", set())
+    if choice in OFFSETS:
+        if choice in selected:
+            selected.remove(choice)
+        else:
+            selected.add(choice)
+        cfg["selected"] = selected
+        # Refresh keyboard to show ✅ marks
+        try:
+            await q.edit_message_reply_markup(reply_markup=build_offset_keyboard(token, selected))
+        except Exception as e:
+            logger.exception("Failed to refresh keyboard: %s", e)
+        await q.answer("Toggled.")
+        return
+
+    await q.answer("Unknown option.")
+
+# -----------------------------
 # Error handler
 # -----------------------------
 async def _on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -530,6 +646,7 @@ def main() -> None:
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_error_handler(_on_error)
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(on_offset_button, pattern=r"^ofs2:"))
     # Muhim: Hamma xabar turlari (text, caption, forward ...) ushlansin
     app.add_handler(MessageHandler(~filters.COMMAND, on_any_message))
 
