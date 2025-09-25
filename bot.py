@@ -241,20 +241,23 @@ def _tz_to_zoneinfo(abbr: str):
 
 def parse_pu_datetime(pu_str: str) -> Optional[datetime]:
     """
-    Qo'llab-quvvatlanadi:
+    PU qatorini matn ICHIDAN parse qiladi (ortiqcha gaplar bo'lsa ham):
     - 5 Sep, 15:40 PDT
     - Sep 5, 15:40 PDT
     - Fri Sep 5 17:50 MDT
     - Fri Sep 26 02:30 CDT
-    - 06:22 AM, 09-26-25, EDT    (YANGI)
+    - 06:22 AM, 09-26-25, EDT
     """
     s = pu_str.strip()
 
-    # TZ (abbr) ni topish
-    tz_m = re.search(r"\b([A-Za-z]{2,4})\s*$", s)
-    tzinfo = _tz_to_zoneinfo(tz_m.group(1)) if tz_m else None
+    # TZ ni matn ichidan qidiramiz
+    tzinfo = None
+    for m in re.finditer(r"\b([A-Za-z]{2,4})\b", s):
+        abbr = m.group(1).upper()
+        if abbr in TZ_ABBR_TO_ZONE:
+            tzinfo = _tz_to_zoneinfo(abbr)
 
-    # 1) dateutil bo'lsa — avval shuni sinaymiz
+    # 1) dateutil bo'lsa — fuzzy parse (ortiqcha so'zlarni e'tiborsiz oladi)
     if du_parser:
         default_year = datetime.now(timezone.utc).astimezone().year
         base = datetime(default_year, 1, 1, 0, 0, 0)
@@ -269,12 +272,15 @@ def parse_pu_datetime(pu_str: str) -> Optional[datetime]:
         except Exception:
             pass
 
-    # 2) Fallback regexlar
-
-    # (a) Eski formatlar (weekday ixtiyoriy)
+    # 2) Fallback regexlar — ^/$ yo'q, matn ichidan izlaydi
     WEEKDAY_OPT = r"(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s*,?\s+)?"
-    pat1 = rf"(?i)^{WEEKDAY_OPT}(?P<d>\d{{1,2}})\s+(?P<mon>[A-Za-z]{{3}}),?\s+(?P<h>\d{{1,2}}):(?P<mi>\d{{2}})\s+(?P<tz>[A-Za-z]{{2,4}})\s*$"
-    pat2 = rf"(?i)^{WEEKDAY_OPT}(?P<mon>[A-Za-z]{{3}})\s+(?P<d>\d{{1,2}}),?\s+(?P<h>\d{{1,2}}):(?P<mi>\d{{2}})\s+(?P<tz>[A-Za-z]{{2,4}})\s*$"
+
+    # (a) "5 Sep, 15:40 PDT"
+    pat1 = rf"(?i){WEEKDAY_OPT}(?P<d>\d{{1,2}})\s+(?P<mon>[A-Za-z]{{3}}),?\s+(?P<h>\d{{1,2}}):(?P<mi>\d{{2}})\s+(?P<tz>[A-Za-z]{{2,4}})"
+    # (b) "Sep 5, 15:40 PDT"
+    pat2 = rf"(?i){WEEKDAY_OPT}(?P<mon>[A-Za-z]{{3}})\s+(?P<d>\d{{1,2}}),?\s+(?P<h>\d{{1,2}}):(?P<mi>\d{{2}})\s+(?P<tz>[A-Za-z]{{2,4}})"
+    # (c) "06:22 AM, 09-26-25, EDT"
+    pat3 = r"(?i)(?P<h>\d{1,2}):(?P<mi>\d{2})\s*(?P<ampm>AM|PM)\s*,\s*(?P<mon>\d{1,2})-(?P<day>\d{1,2})-(?P<yy>\d{2})\s*,\s*(?P<tz>[A-Za-z]{2,4})"
 
     mm = re.search(pat1, s) or re.search(pat2, s)
     if mm:
@@ -286,16 +292,13 @@ def parse_pu_datetime(pu_str: str) -> Optional[datetime]:
         hour = int(mm.group("h"))
         minute = int(mm.group("mi"))
         tz_abbr = mm.group("tz").upper()
-        tzinfo2 = _tz_to_zoneinfo(tz_abbr) or timezone.utc
+        tzinfo2 = _tz_to_zoneinfo(tz_abbr) or tzinfo or timezone.utc
         year = datetime.now(tzinfo2).year
         try:
             return datetime(year, mon, day, hour, minute, tzinfo=tzinfo2)
         except Exception:
             return None
 
-    # (b) YANGI format: "06:22 AM, 09-26-25, EDT"
-    #    12-soatlik vaqt, MM-DD-YY, TZ
-    pat3 = r"(?i)^\s*(?P<h>\d{1,2}):(?P<mi>\d{2})\s*(?P<ampm>AM|PM)\s*,\s*(?P<mon>\d{1,2})-(?P<day>\d{1,2})-(?P<yy>\d{2})\s*,\s*(?P<tz>[A-Za-z]{2,4})\s*$"
     m3 = re.search(pat3, s)
     if m3:
         hour12 = int(m3.group("h"))
@@ -314,7 +317,7 @@ def parse_pu_datetime(pu_str: str) -> Optional[datetime]:
             hour = hour12 if ampm == "AM" else hour12 + 12
 
         tz_abbr = m3.group("tz").upper()
-        tzinfo3 = _tz_to_zoneinfo(tz_abbr) or timezone.utc
+        tzinfo3 = _tz_to_zoneinfo(tz_abbr) or tzinfo or timezone.utc
         try:
             return datetime(year, mon, day, hour, minute, tzinfo=tzinfo3)
         except Exception:
@@ -487,7 +490,7 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             logger.exception("Flex rate/rpm reply failed: %s", e)
         return
 
-    # Schedule: PU sanani aniqlash
+    # Schedule: PU sanani aniqlash (matn ichidan, ortiqcha gaplar bo'lsa ham)
     pu_dt: Optional[datetime] = None
     pu_line_m = PU_LINE_RE.search(text)
     if pu_line_m:
@@ -724,5 +727,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
