@@ -46,7 +46,7 @@ PORT = int(os.getenv("PORT", "8080"))
 # Agar o‘tib ketgan bo‘lsa ham eng kam kechikish (sekund) — 0 qilsa darhol yuboradi
 MIN_DELAY_SEC = int(os.getenv("MIN_DELAY_SEC", "0"))
 
-# (NEW) TZ ko‘rsatilmagan sanalar uchun sukut bo‘yicha zonani belgilang
+# TZ ko‘rsatilmagan sanalar uchun sukut bo‘yicha zonani belgilang
 DEFAULT_TZ = os.getenv("DEFAULT_TZ", "America/New_York")
 
 logging.basicConfig(
@@ -58,7 +58,7 @@ logger = logging.getLogger("tripbot")
 CHAT_LAST_TRIP: Dict[int, str] = {}
 SCHEDULED: Dict[Tuple[int, int], str] = {}
 
-# (NEW) Pending schedule holati: tanlangan offsetlar va PU vaqti
+# Pending schedule holati: tanlangan offsetlar va PU vaqti
 PENDING_PU: Dict[Tuple[int, int], datetime] = {}          # (chat_id, origin_msg_id) -> PU dt (tz-aware)
 PENDING_OFFSETS: Dict[Tuple[int, int], Set[int]] = {}     # (chat_id, origin_msg_id) -> {12, 9, ...}
 
@@ -235,7 +235,6 @@ def build_percentage_reply_flex(base_rate: Optional[Decimal], base_rpm: Optional
 PU_LINE_RE = re.compile(r"(?im)^\s*PU\s*:\s*(.+?)\s*$")
 OFFSET_RE = re.compile(r"(?im)^\s*(?:(?P<h>\d{1,3})\s*h)?\s*(?:(?P<m>\d{1,3})\s*m)?\s*$")
 
-# (NEW) "Empty - Preloaded" to'liq ignor qilish
 def looks_like_preloaded_empty(text: str) -> bool:
     folded = ascii_fold(text).lower()
     return folded.startswith("empty - preloaded")
@@ -263,34 +262,39 @@ def parse_pu_datetime(pu_str: str) -> Optional[datetime]:
     - 5 Sep, 15:40 PDT
     - Sep 5, 15:40 PDT
     - 06:22 AM, 09-26-25, EDT
-    - TZ yozilmagan ko'rinishlar: 9/26/2025, 6:22:00 AM  (DEFAULT_TZ qo'llanadi)
+    - TZ yo‘q: 9/26/2025, 6:22:00 AM  (majburiy DEFAULT_TZ)
     """
     s = pu_str.strip()
 
-    # TZ (abbr) mavjudmi?
+    # Abbr TZ bor-yo‘qligini tekshirib olamiz (EDT/CDT/...)
     tz_m = re.search(r"\b([A-Za-z]{2,4})\s*$", s)
-    tzinfo = _tz_to_zoneinfo(tz_m.group(1)) if tz_m else None
+    abbr_tz = tz_m.group(1) if tz_m else None
+    tzinfo_from_abbr = _tz_to_zoneinfo(abbr_tz) if abbr_tz else None
 
-    # dateutil bo'lsa, fuzzy parse (AM/PM, /, , va hok.)
+    # 1) dateutil bilan urinish
     if du_parser:
         default_year = datetime.now(timezone.utc).astimezone().year
         base = datetime(default_year, 1, 1, 0, 0, 0)
         try:
             dt = du_parser.parse(
-                s, fuzzy=True, dayfirst=False, default=base,
-                tzinfos=(lambda _name: tzinfo) if tzinfo else None,
+                s,
+                fuzzy=True,
+                dayfirst=False,
+                default=base,
+                tzinfos=(lambda _name: tzinfo_from_abbr) if tzinfo_from_abbr else None,
             )
-            # Agar tz ko'rsatilmagan bo'lsa — DEFAULT_TZ ni beramiz
+            # MAJBURIY: TZ yo‘q bo‘lsa DEFAULT_TZ ulaymiz
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=_get_zoneinfo(DEFAULT_TZ) or timezone.utc)
+                tz = _get_zoneinfo(DEFAULT_TZ) or timezone.utc
+                dt = dt.replace(tzinfo=tz)
             return dt
         except Exception:
             pass
 
-    # Fallback regexlar (abbr TZ talab qiladi)
+    # 2) Regex fallbacklar (abbr TZ TALAB qiladi)
     WEEKDAY_OPT = r"(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s*,?\s+)?"
 
-    # 1) "06:22 AM, 09-26-25, EDT"
+    # "06:22 AM, 09-26-25, EDT"
     pat_us_ampm = rf"""(?ix)
         ^{WEEKDAY_OPT}
         (?P<h>\d{{1,2}}):(?P<mi>\d{{2}})
@@ -318,14 +322,13 @@ def parse_pu_datetime(pu_str: str) -> Optional[datetime]:
         except Exception:
             return None
 
-    # 2) "Fri Sep 26 02:30 CDT" va "5 Sep, 15:40 PDT"/"Sep 5, 15:40 PDT"
+    # "Fri Sep 26 02:30 CDT" yoki "5 Sep, 15:40 PDT"/"Sep 5, 15:40 PDT"
     pat1 = rf"(?i)^{WEEKDAY_OPT}(?P<d>\d{{1,2}})\s+(?P<mon>[A-Za-z]{{3}}),?\s+(?P<h>\d{{1,2}}):(?P<mi>\d{{2}})\s+(?P<tz>[A-Za-z]{{2,4}})\s*$"
     pat2 = rf"(?i)^{WEEKDAY_OPT}(?P<mon>[A-Za-z]{{3}})\s+(?P<d>\d{{1,2}}),?\s+(?P<h>\d{{1,2}}):(?P<mi>\d{{2}})\s+(?P<tz>[A-Za-z]{{2,4}})\s*$"
 
     mm = re.search(pat1, s) or re.search(pat2, s)
     if not mm:
-        # Abbr TZ topsakina yuqorida qaytgan bo'lardik; bu yerda None
-        # Shunga qaramay, hech bo'lmasa DEFAULT_TZ bilan qaytishga urinmaymiz (format mos emas).
+        # TZsiz bo‘lsa dateutil yo‘li DEFAULT_TZ bilan qaytgan bo‘lishi kerak edi
         return None
 
     mon = MONTH_ABBR.get(mm.group("mon").lower())
@@ -351,7 +354,7 @@ def parse_offset(text: str) -> Optional[timedelta]:
             return timedelta(hours=int(m.group("h") or 0), minutes=int(m.group("m") or 0))
     return None
 
-# --- Available offsets filtering (NEW) ---
+# --- Available offsets filtering ---
 def _available_offsets_for(pu_dt: datetime) -> List[int]:
     """
     PU - offset - 5m > now (+MIN_DELAY_SEC) shartini qanoatlantirgan offsetlarni qaytaradi.
@@ -409,9 +412,9 @@ async def schedule_ai_available_msg(
     logger.warning("JobQueue missing; using asyncio fallback with delay=%ss", delay)
 
 # -----------------------------
-# Inline keyboard (NEW)
+# Inline keyboard
 # -----------------------------
-# (NEW) 0h qo'shildi — bu PU − 5m degani
+# 0h = PU − 5m varianti ham bor
 OFF_CHOICES = [12, 9, 8, 7, 6, 2, 1, 0]
 CB_PREFIX = "sch"  # callback data prefiksi
 
@@ -441,7 +444,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     q = update.callback_query
     if not q or not q.data:
         return
-    # tez javob (loadingni yopadi)
     try:
         await q.answer()
     except Exception:
@@ -580,7 +582,7 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not text:
         return
 
-    # -------- (NEW) Flexible Rate/RPM foiz hisob --------
+    # -------- Flexible Rate/RPM foiz hisob --------
     try:
         parsed = _parse_flex_rate_rpm(text)
     except Exception as e:
@@ -595,12 +597,9 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except Exception as e:
             logger.exception("Flex rate/rpm reply failed: %s", e)
         return
-    # ----------------------------------------------------
 
-    # -------- (A) Schedule (yangilangan) --------
-    if looks_like_preloaded_empty(text):
-        pass
-    else:
+    # -------- Schedule --------
+    if not looks_like_preloaded_empty(text):
         pu_dt: Optional[datetime] = None
 
         # 1) "PU:" labeled
@@ -617,6 +616,7 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     break
 
         if pu_dt:
+            # Agar qatorda to‘g‘ridan-to‘g‘ri "2h"/"1h" kabi offset bo‘lsa — darhol schedule
             offs = parse_offset(text)
             if offs:
                 send_at = pu_dt - offs - timedelta(minutes=5)
@@ -656,7 +656,7 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 return
         # Agar pu_dt yo'q bo'lsa — sukut, keyingi bloklarga o'tamiz
 
-    # -------- (B) Trip ID post → prompt --------
+    # -------- Trip ID post → prompt --------
     if looks_like_trip_post(text):
         CHAT_LAST_TRIP[msg.chat.id] = text
         try:
@@ -665,7 +665,7 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             logger.exception("Failed to send trip prompt: %s", e)
         return
 
-    # -------- (C) Add/Minus --------
+    # -------- Add/Minus --------
     folded_cmd = ascii_fold(text).lower()
     m = re.search(r"\b(add|minus)\s*([+-]?\d+(?:\.\d{1,2})?)\b", folded_cmd)
     if m:
@@ -755,4 +755,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
