@@ -4,7 +4,7 @@ import logging
 import re
 import unicodedata
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Optional, Tuple, Dict, Set
+from typing import Optional, Tuple, Dict, Set, List
 
 import asyncio
 from datetime import datetime, timedelta, timezone
@@ -348,6 +348,20 @@ def parse_offset(text: str) -> Optional[timedelta]:
             return timedelta(hours=int(m.group("h") or 0), minutes=int(m.group("m") or 0))
     return None
 
+# --- Available offsets filtering (NEW) ---
+def _available_offsets_for(pu_dt: datetime) -> List[int]:
+    """
+    PU - offset - 5m > now (+MIN_DELAY_SEC) shartini qanoatlantirgan offsetlarni qaytaradi.
+    """
+    now_utc = datetime.now(timezone.utc)
+    min_fire_time = now_utc + timedelta(seconds=MIN_DELAY_SEC)
+    avail: List[int] = []
+    for h in OFF_CHOICES:
+        fire_at = (pu_dt - timedelta(hours=h) - timedelta(minutes=5)).astimezone(timezone.utc)
+        if fire_at > min_fire_time:
+            avail.append(h)
+    return avail
+
 async def schedule_ai_available_msg(
     when_dt_utc: datetime,
     chat_id: int,
@@ -400,9 +414,12 @@ CB_PREFIX = "sch"  # callback data prefiksi
 def _kb_for(chat_id: int, origin_msg_id: int) -> InlineKeyboardMarkup:
     key = (chat_id, origin_msg_id)
     chosen = PENDING_OFFSETS.get(key, set())
-    rows = []
-    row = []
-    for h in OFF_CHOICES:
+    pu_dt = PENDING_PU.get(key)
+    choices = OFF_CHOICES if pu_dt is None else _available_offsets_for(pu_dt)
+
+    rows: List[List[InlineKeyboardButton]] = []
+    row: List[InlineKeyboardButton] = []
+    for h in choices:
         label = f"{'✅ ' if h in chosen else ''}{h}h"
         row.append(InlineKeyboardButton(label, callback_data=f"{CB_PREFIX}|sel|{origin_msg_id}|{h}"))
         if len(row) == 3:
@@ -436,6 +453,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 await q.answer()
                 return
             h = int(parts[3])
+            pu_dt = PENDING_PU.get(key)
+            choices = OFF_CHOICES if pu_dt is None else _available_offsets_for(pu_dt)
+            if h not in choices:
+                await q.answer("That offset is no longer available.")
+                await q.edit_message_reply_markup(reply_markup=_kb_for(chat_id, origin_msg_id))
+                return
             s = PENDING_OFFSETS.setdefault(key, set())
             if h in s:
                 s.remove(h)
@@ -457,11 +480,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             if not pu_dt:
                 await q.answer("Time expired or missing.", show_alert=True)
                 return
+            choices = _available_offsets_for(pu_dt)
+            sel = [h for h in sel if h in choices]
             if not sel:
-                await q.answer("Offset tanlang (kamida bitta).", show_alert=True)
+                await q.answer("All selected offsets have passed. Pick new ones.", show_alert=True)
+                await q.edit_message_reply_markup(reply_markup=_kb_for(chat_id, origin_msg_id))
                 return
 
-            # Har bir tanlangan offset uchun schedule: PU - offset - 5m
             created = []
             for h in sel:
                 send_at = pu_dt - timedelta(hours=h) - timedelta(minutes=5)
@@ -475,13 +500,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 SCHEDULED[(chat_id, origin_msg_id)] = send_at_utc.isoformat()
                 created.append(f"{h}h → {send_at.strftime('%Y-%m-%d %H:%M %Z')}")
 
-            # Tozalash
             PENDING_OFFSETS.pop(key, None)
             PENDING_PU.pop(key, None)
 
-            await q.edit_message_text(
-                "✅ Scheduled (PU − offset − 5m):\n" + "\n".join(created)
-            )
+            await q.edit_message_text("✅ Scheduled (PU − offset − 5m):\n" + "\n".join(created))
             await q.answer("Scheduled")
             return
 
@@ -518,7 +540,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• Schedule (PU shartsiz):\n"
         "  Fri Sep 26 02:30 CDT yoki 06:22 AM, 09-26-25, EDT\n"
         "  Offset yozsangiz: `2h` → darhol schedule (PU − offset − 5m)\n"
-        "  Offset yozilmasa: inline tugmalar (12h…1h) chiqadi, multi-select + Submit.",
+        "  Offset yozilmasa: inline tugmalar (12h…1h) chiqadi, multi-select + Submit.\n"
+        "  'Empty - Preloaded' bloklari ignor qilinadi.",
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -550,7 +573,6 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # -------- (A) Schedule (yangilangan) --------
     # "Empty - Preloaded ..." bo'lsa umuman schedulega urinmaymiz
     if looks_like_preloaded_empty(text):
-        # hech narsa demaymiz va boshqa funksiyalarga o'tamiz
         pass
     else:
         pu_dt: Optional[datetime] = None
@@ -587,12 +609,18 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     await msg.reply_text("⚠️ Could not schedule. Check time & offset.")
                 return
             else:
-                # Offset yo'q — inline keyboard chiqaramiz (multi-select + submit)
+                # Offset yo'q — inline keyboard (faqat o‘tmagan offsetlar)
                 key = (msg.chat_id, msg.message_id)
                 PENDING_PU[key] = pu_dt
                 PENDING_OFFSETS[key] = set()
+
+                avail = _available_offsets_for(pu_dt)
+                if not avail:
+                    await msg.reply_text("⏱ All offsets have already passed for this PU time.")
+                    return
+
+                human = pu_dt.strftime("%a, %b %d %I:%M %p %Z")
                 try:
-                    human = pu_dt.strftime("%a, %b %d %I:%M %p %Z")
                     await msg.reply_text(
                         f"PU: {human}\nSelect offsets (multi-select), then Submit. (Will send at PU − offset − 5m)",
                         reply_markup=_kb_for(msg.chat_id, msg.message_id),
@@ -637,6 +665,7 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
             updated_text = update_rate_and_rpm_in_text(original_trip_text, new_rate, new_rpm)
             if not updated_text:
+                # Fallback — Rate satrini yangilab, Per mile qo'shamiz
                 updated_text = re.sub(
                     r"(?m)^.*💰[\s\S]*?\$[0-9][\d,]*(?:\.[0-9]{1,4})?.*$",
                     f"💰 𝗥𝗮𝘁𝗲: {format_money(new_rate)}",
@@ -700,4 +729,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
