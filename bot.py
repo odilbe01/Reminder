@@ -270,11 +270,9 @@ def parse_pu_datetime(pu_str: str) -> Optional[datetime]:
 
     # dateutil bo'lsa, fuzzy parse
     if du_parser:
-        # default yil: hozirgi yil
         default_year = datetime.now(timezone.utc).astimezone().year
         base = datetime(default_year, 1, 1, 0, 0, 0)
         try:
-            # 2-digit yearlarni ham qabul qiladi
             dt = du_parser.parse(
                 s, fuzzy=True, dayfirst=False, default=base,
                 tzinfos=(lambda _name: tzinfo) if tzinfo else None,
@@ -436,27 +434,34 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     q = update.callback_query
     if not q or not q.data:
         return
+    # tez javob (loadingni yopadi)
+    try:
+        await q.answer()
+    except Exception:
+        pass
+
     try:
         parts = q.data.split("|")
         if len(parts) < 3 or parts[0] != CB_PREFIX:
             return
         action = parts[1]
         origin_msg_id = int(parts[2])
-        chat_id = q.message.chat_id if q.message else None
+        chat_id = q.message.chat.id if q.message and q.message.chat else None
         if chat_id is None:
-            await q.answer()
             return
         key = (chat_id, origin_msg_id)
 
         if action == "sel":
             if len(parts) != 4:
-                await q.answer()
                 return
             h = int(parts[3])
             pu_dt = PENDING_PU.get(key)
             choices = OFF_CHOICES if pu_dt is None else _available_offsets_for(pu_dt)
             if h not in choices:
-                await q.answer("That offset is no longer available.")
+                try:
+                    await q.answer("That offset is no longer available.")
+                except Exception:
+                    pass
                 await q.edit_message_reply_markup(reply_markup=_kb_for(chat_id, origin_msg_id))
                 return
             s = PENDING_OFFSETS.setdefault(key, set())
@@ -465,25 +470,37 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             else:
                 s.add(h)
             await q.edit_message_reply_markup(reply_markup=_kb_for(chat_id, origin_msg_id))
-            await q.answer("Toggled")
+            try:
+                await q.answer("Toggled")
+            except Exception:
+                pass
             return
 
         if action == "clr":
             PENDING_OFFSETS.pop(key, None)
             await q.edit_message_reply_markup(reply_markup=_kb_for(chat_id, origin_msg_id))
-            await q.answer("Cleared")
+            try:
+                await q.answer("Cleared")
+            except Exception:
+                pass
             return
 
         if action == "sub":
             pu_dt = PENDING_PU.get(key)
             sel = sorted(PENDING_OFFSETS.get(key, set()), reverse=True)
             if not pu_dt:
-                await q.answer("Time expired or missing.", show_alert=True)
+                try:
+                    await q.answer("Time expired or missing.", show_alert=True)
+                except Exception:
+                    pass
                 return
             choices = _available_offsets_for(pu_dt)
             sel = [h for h in sel if h in choices]
             if not sel:
-                await q.answer("All selected offsets have passed. Pick new ones.", show_alert=True)
+                try:
+                    await q.answer("All selected offsets have passed. Pick new ones.", show_alert=True)
+                except Exception:
+                    pass
                 await q.edit_message_reply_markup(reply_markup=_kb_for(chat_id, origin_msg_id))
                 return
 
@@ -504,7 +521,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             PENDING_PU.pop(key, None)
 
             await q.edit_message_text("✅ Scheduled (PU − offset − 5m):\n" + "\n".join(created))
-            await q.answer("Scheduled")
+            try:
+                await q.answer("Scheduled")
+            except Exception:
+                pass
             return
 
     except Exception as e:
@@ -599,18 +619,18 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     await msg.reply_text("noted")
                     await schedule_ai_available_msg(
                         when_dt_utc=send_at_utc,
-                        chat_id=msg.chat_id,
+                        chat_id=msg.chat.id,
                         reply_to_message_id=msg.message_id,
                         context=context,
                     )
-                    SCHEDULED[(msg.chat_id, msg.message_id)] = send_at_utc.isoformat()
+                    SCHEDULED[(msg.chat.id, msg.message_id)] = send_at_utc.isoformat()
                 except Exception as e:
                     logger.exception("Failed to create schedule: %s", e)
                     await msg.reply_text("⚠️ Could not schedule. Check time & offset.")
                 return
             else:
                 # Offset yo'q — inline keyboard (faqat o‘tmagan offsetlar)
-                key = (msg.chat_id, msg.message_id)
+                key = (msg.chat.id, msg.message_id)
                 PENDING_PU[key] = pu_dt
                 PENDING_OFFSETS[key] = set()
 
@@ -623,7 +643,7 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 try:
                     await msg.reply_text(
                         f"PU: {human}\nSelect offsets (multi-select), then Submit. (Will send at PU − offset − 5m)",
-                        reply_markup=_kb_for(msg.chat_id, msg.message_id),
+                        reply_markup=_kb_for(msg.chat.id, msg.message_id),
                     )
                 except Exception as e:
                     logger.exception("Failed to show inline keyboard: %s", e)
@@ -632,7 +652,7 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # -------- (B) Trip ID post → prompt --------
     if looks_like_trip_post(text):
-        CHAT_LAST_TRIP[msg.chat_id] = text
+        CHAT_LAST_TRIP[msg.chat.id] = text
         try:
             await msg.reply_text(TRIP_PROMPT_1)
         except Exception as e:
@@ -651,7 +671,7 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             if msg.reply_to_message:
                 original_trip_text = (msg.reply_to_message.text or msg.reply_to_message.caption or "")
             else:
-                original_trip_text = CHAT_LAST_TRIP.get(msg.chat_id) or ""
+                original_trip_text = CHAT_LAST_TRIP.get(msg.chat.id) or ""
 
             base_rate = parse_first_dollar_amount(original_trip_text)
             miles = parse_trip_miles(original_trip_text)
