@@ -152,7 +152,7 @@ def update_rate_and_rpm_in_text(original: str, new_rate: Decimal, new_rpm: Decim
 # =============================
 # FLEX: 1 yoki 2 qatorda (faqat sonlar) — $ ixtiyoriy, /mi ixtiyoriy
 # =============================
-RPM_DECISION_MAX = Decimal("25")  # bitta son bo‘lsa: <=25 -> RPM deb qabul qilamiz
+RPM_DECISION_MAX = Decimal("25")
 
 ANY_AMOUNT_RE = re.compile(r"^\s*\$?\s*([0-9][\d,]*(?:\.[0-9]{1,4})?)\s*(?:/mi)?\s*$", re.IGNORECASE)
 HAS_PER_MI_RE = re.compile(r"/\s*mi\b", re.IGNORECASE)
@@ -175,7 +175,7 @@ def _parse_flex_rate_rpm(text: str) -> Optional[Tuple[Optional[Decimal], Optiona
         l2_permi = bool(HAS_PER_MI_RE.search(l2))
         v1, v2 = to_dec(l1), to_dec(l2)
         if l1_permi and not l2_permi:
-            return (v2, v1)  # (rate, rpm)
+            return (v2, v1)
         if l2_permi and not l1_permi:
             return (v1, v2)
         return (v1, v2)
@@ -328,7 +328,6 @@ def parse_pu_datetime(pu_str: str) -> Optional[datetime]:
 
     mm = re.search(pat1, s) or re.search(pat2, s)
     if not mm:
-        # TZsiz bo‘lsa dateutil yo‘li DEFAULT_TZ bilan qaytgan bo‘lishi kerak edi
         return None
 
     mon = MONTH_ABBR.get(mm.group("mon").lower())
@@ -414,9 +413,9 @@ async def schedule_ai_available_msg(
 # -----------------------------
 # Inline keyboard
 # -----------------------------
-# 0h = PU − 5m varianti ham bor
-OFF_CHOICES = [12, 9, 8, 7, 6, 2, 1, 0]
-CB_PREFIX = "sch"  # callback data prefiksi
+# 0h olib tashlandi — ro‘yxat faqat 12h…1h
+OFF_CHOICES = [12, 9, 8, 7, 6, 2, 1]
+CB_PREFIX = "sch"
 
 def _kb_for(chat_id: int, origin_msg_id: int) -> InlineKeyboardMarkup:
     key = (chat_id, origin_msg_id)
@@ -427,8 +426,7 @@ def _kb_for(chat_id: int, origin_msg_id: int) -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = []
     row: List[InlineKeyboardButton] = []
     for h in choices:
-        label_core = "0h (5m)" if h == 0 else f"{h}h"
-        label = f"{'✅ ' if h in chosen else ''}{label_core}"
+        label = f"{'✅ ' if h in chosen else ''}{h}h"
         row.append(InlineKeyboardButton(label, callback_data=f"{CB_PREFIX}|sel|{origin_msg_id}|{h}"))
         if len(row) == 3:
             rows.append(row); row = []
@@ -567,9 +565,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "👋 TripBot is alive.\n\n"
         "• Reply 'Add 100' / 'Minus 100' (yoki 'Add100') — Rate & $/mi qayta hisoblanadi.\n"
         "• Schedule (PU shartsiz):\n"
-        "  Fri Sep 26 02:30 CDT, 06:22 AM, 09-26-25, EDT yoki tz yo‘q bo‘lsa ham: 9/26/2025, 6:22:00 AM (sukut: DEFAULT_TZ)\n"
+        "  Fri Sep 26 02:30 CDT, 06:22 AM, 09-26-25, EDT — yoki tz yo‘q bo‘lsa ham: 9/26/2025, 6:22:00 AM (sukut: DEFAULT_TZ)\n"
         "  Offset yozsangiz: `2h` → darhol schedule (PU − offset − 5m)\n"
-        "  Offset yozilmasa: inline tugmalar (12h…1h, 0h (5m)) — multi-select + Submit.\n"
+        "  Offset yozilmasa: inline tugmalar (12h…1h) — multi-select + Submit.\n"
         "  'Empty - Preloaded' bloklari ignor qilinadi.",
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -616,7 +614,6 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     break
 
         if pu_dt:
-            # Agar qatorda to‘g‘ridan-to‘g‘ri "2h"/"1h" kabi offset bo‘lsa — darhol schedule
             offs = parse_offset(text)
             if offs:
                 send_at = pu_dt - offs - timedelta(minutes=5)
@@ -691,7 +688,6 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
             updated_text = update_rate_and_rpm_in_text(original_trip_text, new_rate, new_rpm)
             if not updated_text:
-                # Fallback — Rate satrini yangilab, Per mile qo'shamiz
                 updated_text = re.sub(
                     r"(?m)^.*💰[\s\S]*?\$[0-9][\d,]*(?:\.[0-9]{1,4})?.*$",
                     f"💰 𝗥𝗮𝘁𝗲: {format_money(new_rate)}",
