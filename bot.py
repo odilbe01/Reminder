@@ -221,6 +221,32 @@ def build_percentage_reply_flex(base_rate: Optional[Decimal], base_rpm: Optional
     return "\n\n".join(chunks)
 
 # -----------------------------
+# Address detection (schedule faqat datetime + address bo'lsa)
+# -----------------------------
+US_STATE_ABBR = (
+    "AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN "
+    "MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA "
+    "WA WV WI WY DC"
+).split()
+
+STREET_SUFFIXES = r"(?:St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Dr|Drive|Ln|Lane|Ct|Court|Hwy|Highway|Pkwy|Parkway|Pl|Place|Terrace|Way)"
+STREET_ADDR_RE = re.compile(
+    rf"\b\d{{1,6}}\s+[A-Za-z0-9.\- ]+\s+{STREET_SUFFIXES}\b", re.IGNORECASE
+)
+CITY_STATE_RE = re.compile(
+    rf"\b[A-Za-z .'-]+,\s*(?:{'|'.join(US_STATE_ABBR)})\b(?:\s*\d{{5}}(?:-\d{{4}})?)?",
+    re.IGNORECASE,
+)
+
+def text_has_address(text: str) -> bool:
+    """Matnda ko‘rinadigan address naqshlari bor-yo‘qligini tekshiradi."""
+    if STREET_ADDR_RE.search(text):
+        return True
+    if CITY_STATE_RE.search(text):
+        return True
+    return False
+
+# -----------------------------
 # PU + offset parsing & scheduling
 # -----------------------------
 PU_LINE_RE = re.compile(r"(?im)^\s*PU\s*:\s*(.+?)\s*$")
@@ -445,9 +471,32 @@ TRIP_PROMPT_1 = (
     "@dispatchrepublic  @Aziz_157 @d1spa1ch @d1spa1ch_team"
 )
 
+# Kengaytirilgan trip-post deteksiyasi:
+# Trip ID / TripID / VRID / Route ID / Load ID / 🗺 va boshqalar
+TRIP_TRIGGERS = [
+    re.compile(r"\btrip\s*id\b", re.IGNORECASE),
+    re.compile(r"\btripid\b", re.IGNORECASE),
+    re.compile(r"\bvrid\b", re.IGNORECASE),
+    re.compile(r"\broute\s*id\b", re.IGNORECASE),
+    re.compile(r"\bload\s*id\b", re.IGNORECASE),
+    re.compile(r"🗺"),
+    # Amazon uslubidagi "ID: ABC123" (ixtiyoriy) — haddan tashqari agressiv bo‘lmaslik uchun comment qoldirdik:
+    # re.compile(r"\bID\s*:\s*[A-Z0-9]{6,}\b"),
+]
+
 def looks_like_trip_post(text: str) -> bool:
+    if not text:
+        return False
+    for pat in TRIP_TRIGGERS:
+        if pat.search(text):
+            return True
+    # Qo'shimcha yumshoq tekshiruv (kamroq qat'iy)
     folded = ascii_fold(text).lower()
-    return ("trip id" in folded) or ("🗺" in text)
+    key_hits = 0
+    for kw in ["pickup", "delivery", "mi", "rate", "stop", "facility", "drop", "live load"]:
+        if kw in folded:
+            key_hits += 1
+    return key_hits >= 3  # 3+ kalit so‘z bor bo‘lsa trip post deb qabul qilamiz
 
 def get_message_text(update: Update) -> str:
     msg = update.effective_message
@@ -463,7 +512,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  Fri Sep 26 02:30 CDT yoki 06:22 AM, 09-26-25, EDT (caption yoki text)\n"
         "  → 12h/9h/... ni tanlang (bir nechta ham bo'ladi), so'ng Submit.\n"
         "  Bot: har biri uchun PU − offset − 5m vaqtda xabar yuboradi.\n"
-        "  Agar keyingi qatorda '6h' yozsangiz, shu offset bilan darhol schedule bo'ladi.",
+        "  Agar keyingi qatorda '6h' yozsangiz, shu offset bilan darhol schedule bo'ladi.\n"
+        "  ❗ Schedule faqat matnda sana-vaqt VA address ko‘rinib turganida ishlaydi.",
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -496,6 +546,7 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if pu_line_m:
         pu_dt = parse_pu_datetime(pu_line_m.group(1).strip())
     else:
+        # Matnni qatorma-qator skanerlaymiz va birinchi to‘g‘ri datetime ni olamiz
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
         for ln in lines:
             dt_try = parse_pu_datetime(ln)
@@ -503,11 +554,20 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 pu_dt = dt_try
                 break
 
+    # ✅ Yangi qoidalar: schedule faqat (datetime + address) bo‘lsa ishlasin
     if pu_dt:
+        if not text_has_address(text):
+            # address topilmasa schedule qilmaymiz
+            # Agar mutlaqo jim o‘tib ketishni xohlasangiz, quyidagi reply_textni komment qiling.
+            try:
+                await msg.reply_text("ℹ️ Schedule ishlashi uchun address ham yozing (masalan: `123 Main St` yoki `City, NY 10001`).")
+            except Exception:
+                pass
+            return
+
         # Agar matnda offset berilgan bo'lsa — darhol schedule
         offs = parse_offset(text)
         if offs:
-            # o‘tmishga tushganini tekshiramiz
             if not _is_future_send_time(pu_dt, offs):
                 await msg.reply_text("⚠️ This offset is already in the past. Choose another time.")
                 return
@@ -527,7 +587,7 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await msg.reply_text("⚠️ Could not schedule. Check time & offset.")
             return
 
-        # Aks holda — multi-select klaviatura yuboramiz (faqat kelajakdagi variantlar)
+        # Aks holda — multi-select klaviatura (faqat kelajak variantlar)
         token = _gen_token()
         PENDING_SCHEDULES[token] = {
             "chat_id": msg.chat_id,
