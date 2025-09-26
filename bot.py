@@ -46,6 +46,9 @@ PORT = int(os.getenv("PORT", "8080"))
 # Agar o‘tib ketgan bo‘lsa ham eng kam kechikish (sekund) — 0 qilsa darhol yuboradi
 MIN_DELAY_SEC = int(os.getenv("MIN_DELAY_SEC", "0"))
 
+# (NEW) TZ ko‘rsatilmagan sanalar uchun sukut bo‘yicha zonani belgilang
+DEFAULT_TZ = os.getenv("DEFAULT_TZ", "America/New_York")
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -221,11 +224,8 @@ def build_percentage_reply_flex(base_rate: Optional[Decimal], base_rpm: Optional
         line1 = " ".join(parts)
 
         shown = new_rate if new_rate is not None else new_rpm
-        if shown is not None:
-            line2 = f"{_strip_trailing_zeros(shown)} {RATE_REASON}"
-            chunks.append(f"{line1}\n{line2}")
-        else:
-            chunks.append(line1)
+        line2 = f"{_strip_trailing_zeros(shown)} {RATE_REASON}" if shown is not None else None
+        chunks.append(line1 if line2 is None else f"{line1}\n{line2}")
 
     return "\n\n".join(chunks)
 
@@ -240,18 +240,21 @@ def looks_like_preloaded_empty(text: str) -> bool:
     folded = ascii_fold(text).lower()
     return folded.startswith("empty - preloaded")
 
+def _get_zoneinfo(name: str):
+    if du_tz:
+        return du_tz.gettz(name)
+    if ZoneInfo:
+        try:
+            return ZoneInfo(name)
+        except Exception:
+            return None
+    return None
+
 def _tz_to_zoneinfo(abbr: str):
     zone = TZ_ABBR_TO_ZONE.get(abbr.upper())
     if not zone:
         return None
-    if du_tz:
-        return du_tz.gettz(zone)
-    if ZoneInfo:
-        try:
-            return ZoneInfo(zone)
-        except Exception:
-            return None
-    return None
+    return _get_zoneinfo(zone)
 
 def parse_pu_datetime(pu_str: str) -> Optional[datetime]:
     """
@@ -260,15 +263,15 @@ def parse_pu_datetime(pu_str: str) -> Optional[datetime]:
     - 5 Sep, 15:40 PDT
     - Sep 5, 15:40 PDT
     - 06:22 AM, 09-26-25, EDT
-    - Weekday ixtiyoriy; AM/PM ixtiyoriy; 2 xonali yil ixtiyoriy
+    - TZ yozilmagan ko'rinishlar: 9/26/2025, 6:22:00 AM  (DEFAULT_TZ qo'llanadi)
     """
     s = pu_str.strip()
 
-    # TZ
+    # TZ (abbr) mavjudmi?
     tz_m = re.search(r"\b([A-Za-z]{2,4})\s*$", s)
     tzinfo = _tz_to_zoneinfo(tz_m.group(1)) if tz_m else None
 
-    # dateutil bo'lsa, fuzzy parse
+    # dateutil bo'lsa, fuzzy parse (AM/PM, /, , va hok.)
     if du_parser:
         default_year = datetime.now(timezone.utc).astimezone().year
         base = datetime(default_year, 1, 1, 0, 0, 0)
@@ -277,13 +280,14 @@ def parse_pu_datetime(pu_str: str) -> Optional[datetime]:
                 s, fuzzy=True, dayfirst=False, default=base,
                 tzinfos=(lambda _name: tzinfo) if tzinfo else None,
             )
-            if dt.tzinfo is None and tzinfo:
-                dt = dt.replace(tzinfo=tzinfo)
+            # Agar tz ko'rsatilmagan bo'lsa — DEFAULT_TZ ni beramiz
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=_get_zoneinfo(DEFAULT_TZ) or timezone.utc)
             return dt
         except Exception:
             pass
 
-    # Fallback regexlar
+    # Fallback regexlar (abbr TZ talab qiladi)
     WEEKDAY_OPT = r"(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s*,?\s+)?"
 
     # 1) "06:22 AM, 09-26-25, EDT"
@@ -294,7 +298,6 @@ def parse_pu_datetime(pu_str: str) -> Optional[datetime]:
         (?P<mo>\d{{1,2}})-(?P<d>\d{{1,2}})-(?P<y>\d{{2,4}})
         \s*,\s*(?P<tz>[A-Za-z]{{2,4}})\s*$
     """
-
     m = re.search(pat_us_ampm, s)
     if m:
         hour = int(m.group("h"))
@@ -309,18 +312,20 @@ def parse_pu_datetime(pu_str: str) -> Optional[datetime]:
         year = int(m.group("y"))
         if year < 100:
             year += 2000
-        tzinfo = _tz_to_zoneinfo(m.group("tz")) or timezone.utc
+        tzinfo2 = _tz_to_zoneinfo(m.group("tz")) or timezone.utc
         try:
-            return datetime(year, mon, day, hour, minute, tzinfo=tzinfo)
+            return datetime(year, mon, day, hour, minute, tzinfo=tzinfo2)
         except Exception:
             return None
 
-    # 2) "Fri Sep 26 02:30 CDT" hamda "5 Sep, 15:40 PDT" / "Sep 5, 15:40 PDT"
+    # 2) "Fri Sep 26 02:30 CDT" va "5 Sep, 15:40 PDT"/"Sep 5, 15:40 PDT"
     pat1 = rf"(?i)^{WEEKDAY_OPT}(?P<d>\d{{1,2}})\s+(?P<mon>[A-Za-z]{{3}}),?\s+(?P<h>\d{{1,2}}):(?P<mi>\d{{2}})\s+(?P<tz>[A-Za-z]{{2,4}})\s*$"
     pat2 = rf"(?i)^{WEEKDAY_OPT}(?P<mon>[A-Za-z]{{3}})\s+(?P<d>\d{{1,2}}),?\s+(?P<h>\d{{1,2}}):(?P<mi>\d{{2}})\s+(?P<tz>[A-Za-z]{{2,4}})\s*$"
 
     mm = re.search(pat1, s) or re.search(pat2, s)
     if not mm:
+        # Abbr TZ topsakina yuqorida qaytgan bo'lardik; bu yerda None
+        # Shunga qaramay, hech bo'lmasa DEFAULT_TZ bilan qaytishga urinmaymiz (format mos emas).
         return None
 
     mon = MONTH_ABBR.get(mm.group("mon").lower())
@@ -330,10 +335,10 @@ def parse_pu_datetime(pu_str: str) -> Optional[datetime]:
     hour = int(mm.group("h"))
     minute = int(mm.group("mi"))
     tz_abbr = mm.group("tz").upper()
-    tzinfo = _tz_to_zoneinfo(tz_abbr) or timezone.utc
-    year = datetime.now(tzinfo).year
+    tzinfo3 = _tz_to_zoneinfo(tz_abbr) or timezone.utc
+    year = datetime.now(tzinfo3).year
     try:
-        return datetime(year, mon, day, hour, minute, tzinfo=tzinfo)
+        return datetime(year, mon, day, hour, minute, tzinfo=tzinfo3)
     except Exception:
         return None
 
@@ -406,7 +411,8 @@ async def schedule_ai_available_msg(
 # -----------------------------
 # Inline keyboard (NEW)
 # -----------------------------
-OFF_CHOICES = [12, 9, 8, 7, 6, 2, 1]  # soat
+# (NEW) 0h qo'shildi — bu PU − 5m degani
+OFF_CHOICES = [12, 9, 8, 7, 6, 2, 1, 0]
 CB_PREFIX = "sch"  # callback data prefiksi
 
 def _kb_for(chat_id: int, origin_msg_id: int) -> InlineKeyboardMarkup:
@@ -418,7 +424,8 @@ def _kb_for(chat_id: int, origin_msg_id: int) -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = []
     row: List[InlineKeyboardButton] = []
     for h in choices:
-        label = f"{'✅ ' if h in chosen else ''}{h}h"
+        label_core = "0h (5m)" if h == 0 else f"{h}h"
+        label = f"{'✅ ' if h in chosen else ''}{label_core}"
         row.append(InlineKeyboardButton(label, callback_data=f"{CB_PREFIX}|sel|{origin_msg_id}|{h}"))
         if len(row) == 3:
             rows.append(row); row = []
@@ -558,9 +565,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "👋 TripBot is alive.\n\n"
         "• Reply 'Add 100' / 'Minus 100' (yoki 'Add100') — Rate & $/mi qayta hisoblanadi.\n"
         "• Schedule (PU shartsiz):\n"
-        "  Fri Sep 26 02:30 CDT yoki 06:22 AM, 09-26-25, EDT\n"
+        "  Fri Sep 26 02:30 CDT, 06:22 AM, 09-26-25, EDT yoki tz yo‘q bo‘lsa ham: 9/26/2025, 6:22:00 AM (sukut: DEFAULT_TZ)\n"
         "  Offset yozsangiz: `2h` → darhol schedule (PU − offset − 5m)\n"
-        "  Offset yozilmasa: inline tugmalar (12h…1h) chiqadi, multi-select + Submit.\n"
+        "  Offset yozilmasa: inline tugmalar (12h…1h, 0h (5m)) — multi-select + Submit.\n"
         "  'Empty - Preloaded' bloklari ignor qilinadi.",
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -591,7 +598,6 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # ----------------------------------------------------
 
     # -------- (A) Schedule (yangilangan) --------
-    # "Empty - Preloaded ..." bo'lsa umuman schedulega urinmaymiz
     if looks_like_preloaded_empty(text):
         pass
     else:
@@ -749,3 +755,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
